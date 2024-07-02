@@ -38,17 +38,16 @@ ZeffMax = 10
 alphaMin = 0
 alphaMax = 0.5
 
-# energy
+
+
 EnergyMaxeV = 5e6
-EnergyMineV = 0.25/np.sqrt(abs(EFMin)-1)
-
-# lorentz factor
 gMax = 1 + EnergyMaxeV / mecSQ
-gMin = 1 + EnergyMineV / mecSQ
-
-# momentum normalized to m_e*c
 pMax = np.sqrt(gMax**2-1)
-pMin = np.sqrt(gMin**2-1)
+
+
+pMin = 0.25/np.sqrt(abs(EFMin)-1)
+gMin = np.sqrt(pMin**2 + 1)
+EnergyMineV = (gMin - 1) * mecSQ
 
 # pitch-angle
 xiMax = 1
