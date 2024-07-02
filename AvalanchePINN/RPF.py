@@ -18,8 +18,8 @@ tf.random.set_random_seed(1234) # Setting fixed random number generator seed
 mecSQ = 511e3 # electron rest mass in units eV
 
 # Numerical parameters
-epochsADAM = 15000 # number of epochs for the adam optimizer
-epochsBFGS = 100000 # number of epochs for each LBFGS-B optimizer training period
+epochsADAM = 30000 # number of epochs for the adam optimizer
+epochsBFGS = 10000 # number of epochs for each LBFGS-B optimizer training period
 NumBFGS = 100 # number of LBFGS-B training periods
 lr = 5.e-4 # learning rate for the adam optimizer
 pts = 1000000 # number of points sampled in the domain
@@ -27,7 +27,7 @@ pts = 1000000 # number of points sampled in the domain
 # Setting ranges of physics parameters that the PINN will learn
 
 # electric field normalized to connor-hastie electric field
-EFMin = -10
+EFMin = -500
 EFMax = -1
 
 # effective charge
@@ -36,7 +36,7 @@ ZeffMax = 10
 
 # synchrotron radiation strength
 alphaMin = 0
-alphaMax = 0.2
+alphaMax = 0.5
 
 # energy
 EnergyMaxeV = 5e6
@@ -91,7 +91,7 @@ def pde(inputs, outputs):
 
     # Constructing the loss term, scaled by the inverse of the collisional drag to prevent
     # divergence at low momentum
-    loss = (p**2/(1+p**2)) * ( ElecticFieldTerms + CollisionalTerms + RadiationTerms )
+    loss = (p**2/(1+p**2)) * ( ElecticFieldTerms + CollisionalTerms + RadiationTerms ) / tf.abs(Ephi)
 
     return loss
 
@@ -106,21 +106,32 @@ def output_transform(inputs, outputs):
     # un-normalizing electric field
     Ephi = EFMin + ( EFMax - EFMin ) * EFNorm
 
-    # computing lorentz factor
-    gamma = tf.sqrt(p**2+1)
+    # Computing maximum lorentz factor in training range
+    gMax = np.sqrt(pMax**2+1)
 
-    # Smoothing factor for heaviside function containing the electric field
-    dEphi = 0.1
+    # Computing collisional drag at maximum energy
+    CFMax = (1+pMax**2)/pMax**2
 
-    # heaviside function for the electric field, vanishes at Ephi = 1 and assymptotes to 1
-    Heaviside = 0.5 * ( 1 + tf.tanh((-1-Ephi)/dEphi) )
+    # Computing critical pitch angle for positive energy flux at maximum energy
+    xiStar = (-Ephi - tf.sqrt(Ephi**2 - 4*(alpha*gMax*pMax*(-CFMax-alpha*gMax*pMax))))/(2*alpha*gMax*pMax)
 
-    # constraining PINN output to vanish for Ephi < 1 and p = pMin
-    Prob = Heaviside*((p-pMin)/(pMax-pMin)) * outputs[:, 0:1]
+    # Heaviside function pitch-angle at maximum energy with transition
+    # centered at xiStar
+    dEphi = 5
+    Heaviside = tf.tanh(-Ephi-1/dEphi)
+    dXiOut = 0.15*Heaviside + 0.1
+    xiOut = 0.5*(1-tf.tanh((xi-xiStar)/dXiOut))
 
-    # constraining the PINN to be between 0 and 1
-    Prob = tf.tanh(Prob*Prob)
+    # Heaviside function to become unity for electric fields
+    # E_\Vert/E_c > 1
+    dEphi = 0.25
+    DProb = 0.25
+    Heaviside = tf.tanh(-Ephi-1/dEphi)
 
+    # Constraining neural network outputs
+    pRE = (p-pMin)/(pMax-pMin)*xiOut
+    Prob = Heaviside*(pRE + (p-pMin)* (pMax-p*xiOut) / pMax * outputs[:, 0:1])
+    Prob = tf.tanh((Prob/DProb)*(Prob/DProb))
     return tf.concat((Prob), axis=1)
 
 
@@ -130,51 +141,23 @@ def main():
 
     # construct neural network
     numNeurons = 64 # number of neurons for each hidden layer
-    numLayers  = 6  # number of hidden layers
+    numLayers  = 4  # number of hidden layers
     net = dde.maps.FNN([5] + [numNeurons] * numLayers + [1], "tanh", "Glorot normal") # 5 corresponds to the number of dimensions
 
     # apply additional layer on network
     net.apply_output_transform(output_transform)
-
-    # boundary function to enforce a dirchlet boundary condition at p_max
-    def boundary(inputs, on_boundary):
-
-        # unfolding the inputs
-        p = inputs[0]
-        xi = inputs[1]
-        EFNorm = inputs[2] # normalized electric field to be between 0 and 1
-        alphaNorm = inputs[4] # normalied synchrotron strength to be between 0 and 1
-
-        # un-normalizing inputs
-        Ephi = EFMin + ( EFMax - EFMin ) * EFNorm
-        alpha = alphaMin + ( alphaMax - alphaMin ) * alphaNorm
-
-        # energy flux equation
-        Up = xi*Ephi - (gMax**2/pMax**2) - alpha*gMax*pMax*(1-xi**2)
-
-        # return boolean if p = p_max and U_p > 0
-        return on_boundary and np.isclose(p, pMax) and Up > 0
     
-    # applying the Dirchlet BC at p_max
-    bc_pMax = dde.DirichletBC(
-        geom, # geometry to apply it to
-        lambda x: 1 + 0*x[:, 1:2], # sets the RPF to be 1 if boundary=True
-        boundary,
-        component=0
-    )
-
     # constructing all losses to be minimized by the PINN (PDE loss is already included)
     # and does not need to be added
-    losses = [bc_pMax]
+    losses = []
 
     # Constructing data object which the PINN will use for the model
-    data = dde.data.TimePDE(
+    data = dde.data.PDE(
         geom,                            # geometry
         pde,                             # pde
         losses,                          # loss terms
         num_domain=pts,                  # number of points in the domain
         num_boundary=10000,              # number of points on the boundary of the geometry
-        num_initial=0,                   # number of initial points (0 since this is steady-state)
         num_test=pts,                    # number of test points on the domain
         train_distribution='Hammersley', # training point distribution
     )
@@ -207,21 +190,21 @@ def main():
 
 
 
-        # routine that adds additional points at maximum of the residual of the PDE
-        numPointsAdd = 100000 # number of additional points to add
-        xpp = geom.random_points(numPointsAdd)
+        # # routine that adds additional points at maximum of the residual of the PDE
+        # numPointsAdd = 100000 # number of additional points to add
+        # xpp = geom.random_points(numPointsAdd)
 
-        # predict the model
-        f = model.predict(xpp, operator=pde)
+        # # predict the model
+        # f = model.predict(xpp, operator=pde)
 
-        # evaluate residual
-        err_eq_f = np.absolute(f)
+        # # evaluate residual
+        # err_eq_f = np.absolute(f)
 
-        # Add additional points
-        for i in range(0,10):
-            x_id = np.argmax(err_eq_f)          # index to add points
-            data.add_anchors(xpp[x_id])         # add additional points
-            err_eq_f = np.delete(err_eq_f,x_id) # delete previous index
+        # # Add additional points
+        # for i in range(0,10):
+        #     x_id = np.argmax(err_eq_f)          # index to add points
+        #     data.add_anchors(xpp[x_id])         # add additional points
+        #     err_eq_f = np.delete(err_eq_f,x_id) # delete previous index
 
 if __name__ == "__main__":
     main()
