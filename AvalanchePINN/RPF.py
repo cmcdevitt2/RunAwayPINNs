@@ -90,7 +90,7 @@ def pde(inputs, outputs):
 
     # Constructing the loss term, scaled by the inverse of the collisional drag to prevent
     # divergence at low momentum
-    loss = (p**2/(1+p**2)) * ( ElecticFieldTerms + CollisionalTerms + RadiationTerms ) / tf.abs(Ephi)
+    loss = (p**2/(1+p**2)) * ( ElecticFieldTerms + CollisionalTerms + RadiationTerms ) / -Ephi
 
     return loss
 
