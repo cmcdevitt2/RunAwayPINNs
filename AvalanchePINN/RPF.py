@@ -40,7 +40,7 @@ alphaMax = 0.2
 
 # energy
 EnergyMaxeV = 5e6
-EnergyMineV = 1e4
+EnergyMineV = 0.25/np.sqrt(abs(EFMin)-1)
 
 # lorentz factor
 gMax = 1 + EnergyMaxeV / mecSQ
