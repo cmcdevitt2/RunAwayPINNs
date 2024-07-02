@@ -170,6 +170,7 @@ def main():
     
     # Training the PINN with the adam optimizer
     losshistory, train_state = model.train(epochs=epochsADAM, model_save_path = './model/model.ckpt')
+    dde.saveplot(losshistory, train_state, issave=True, isplot=False)
 
     # Looping through each LBFGS-B optimizer training period
     for i in range(0,NumBFGS):
