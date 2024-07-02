@@ -102,9 +102,13 @@ def output_transform(inputs, outputs):
     p      = inputs[:, 0:1]
     xi     = inputs[:, 1:2]
     EFNorm = inputs[:, 2:3] # normalized electric field to be between 0 and 1
+    ZeffNorm  = inputs[:, 3:4] # effective charge normalized to be between 0 and 1
+    alphaNorm = inputs[:, 4:5] # synchrotron radiation strength normalized to be between 0 and 1
 
     # un-normalizing electric field
     Ephi = EFMin + ( EFMax - EFMin ) * EFNorm
+    Zeff = ZeffMin + ( ZeffMax - ZeffMin ) * ZeffNorm
+    alpha = alphaMin + ( alphaMax - alphaMin ) * alphaNorm
 
     # Computing maximum lorentz factor in training range
     gMax = np.sqrt(pMax**2+1)
