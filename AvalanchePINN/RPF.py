@@ -45,7 +45,7 @@ gMax = 1 + EnergyMaxeV / mecSQ
 pMax = np.sqrt(gMax**2-1)
 
 
-pMin = 10#0.25/np.sqrt(abs(EFMin)-1)
+pMin = 0.01#0.25/np.sqrt(abs(EFMin)-1)
 gMin = np.sqrt(pMin**2 + 1)
 EnergyMineV = (gMin - 1) * mecSQ
 
