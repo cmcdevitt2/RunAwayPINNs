@@ -9,7 +9,7 @@ This repository contains Physics Informed Neural Networks (PINNs) [[Raissi 2019]
 The main libraries used to construct and train the PINN include [DeepXDE](https://deepxde.readthedocs.io/en/latest/) with the [Tensorflow](https://www.tensorflow.org) backend. While the PINN can be trained on either a CPU or a GPU, it is recommended to use GPUs for training, given their increased performance for neural network training. The PINNs in this repo can be trained on a single GPU. To get started the bash script [init.sh](init.sh) will create a Python environment and install the relevant dependencies. The specific libraries installed as of July 1st 2024 are:
 
 - DeepXDE 1.10.0
-- Tensorflow 2.7.0
+- Tensorflow 2.9.0
 - Matplotlib 3.8.0
 - Numpy 1.26.4
 - Scipy 1.13.0
