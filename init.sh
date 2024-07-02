@@ -5,14 +5,14 @@
 echo 'Creating New Project'
 echo ''
 
-mkdir models
-
+echo 'Attempting to load python module'
 module load python
 
 echo 'Creating Virtual Environment'
 echo ''
 python -m venv env
 
+echo 'Activating newly created python environment'
 source env/bin/activate
 
 pip install --upgrade pip==21.0
