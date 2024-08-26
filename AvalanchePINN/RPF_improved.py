@@ -22,12 +22,12 @@ epochsADAM = 30000 # number of epochs for the adam optimizer
 epochsBFGS = 10000 # number of epochs for each LBFGS-B optimizer training period
 NumBFGS = 100 # number of LBFGS-B training periods
 lr = 5.e-4 # learning rate for the adam optimizer
-pts = 1000000 # number of points sampled in the domain
+pts = 100000 # number of points sampled in the domain
 
 # Setting ranges of physics parameters that the PINN will learn
 
 # electric field normalized to connor-hastie electric field
-EFMin = -500
+EFMin = -20
 EFMax = -1
 
 # effective charge
@@ -35,8 +35,8 @@ ZeffMin = 1
 ZeffMax = 10
 
 # synchrotron radiation strength
-alphaMin = 0
-alphaMax = 0.5
+alphaMin = 1.e-4
+alphaMax = 0.2
 
 
 
@@ -45,7 +45,7 @@ gMax = 1 + EnergyMaxeV / mecSQ
 pMax = np.sqrt(gMax**2-1)
 
 
-pMin = 0.01#0.25/np.sqrt(abs(EFMin)-1)
+pMin = 0.25/np.sqrt(abs(EFMin)-1)
 gMin = np.sqrt(pMin**2 + 1)
 EnergyMineV = (gMin - 1) * mecSQ
 
@@ -115,6 +115,9 @@ def output_transform(inputs, outputs):
     # Computing collisional drag at maximum energy
     CFMax = (1+pMax**2)/pMax**2
 
+    # Heaviside function for \alpha < 10^-4
+    #dalpha = 0.0001
+    #Heaviside = 0.5*(1+tf.tanh(alpha-1.e-3/dalpha))
     # Computing critical pitch angle for positive energy flux at maximum energy
     xiStar = (-Ephi - tf.sqrt(Ephi**2 - 4*(alpha*gMax*pMax*(-CFMax-alpha*gMax*pMax))))/(2*alpha*gMax*pMax)
 
@@ -143,9 +146,9 @@ def main():
     geom = dde.geometry.Hypercube([pMin, xiMin, 0, 0, 0], [pMax, xiMax, 1, 1, 1])
 
     # construct neural network
-    numNeurons = 64 # number of neurons for each hidden layer
-    numLayers  = 4  # number of hidden layers
-    net = dde.maps.FNN([5] + [numNeurons] * numLayers + [1], "tanh", "Glorot normal") # 5 corresponds to the number of dimensions
+    numNeurons = 32 # number of neurons for each hidden layer
+    numLayers  = 2  # number of hidden layers
+    net = dde.maps.FNN([5] + [numNeurons] * numLayers + [1], "swish", "Glorot normal") # 5 corresponds to the number of dimensions
 
     # apply additional layer on network
     net.apply_output_transform(output_transform)
@@ -160,7 +163,7 @@ def main():
         pde,                             # pde
         losses,                          # loss terms
         num_domain=pts,                  # number of points in the domain
-        num_boundary=10000,              # number of points on the boundary of the geometry
+        num_boundary=100000,              # number of points on the boundary of the geometry
         num_test=pts,                    # number of test points on the domain
         train_distribution='Hammersley', # training point distribution
     )
@@ -191,6 +194,7 @@ def main():
 
         # Saving loss and model at end of training period
         losshistory, train_state = model.train(model_save_path = './model/model.ckpt')
+        dde.saveplot(losshistory, train_state, issave=True, isplot=False)
 
 
 
