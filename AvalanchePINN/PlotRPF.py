@@ -13,7 +13,7 @@ import deepxde as dde
 from deepxde.backend import tf
 from scipy import integrate
 from scipy.special import kn
-
+plt.rcParams.update({'font.size': 18})
 
 dde.config.set_default_float("float64") # needed from DeepXDE
 
@@ -75,7 +75,7 @@ trainpts = np.loadtxt(train_save_path)
 loss = np.loadtxt(loss_save_path)
 
 
-# !!! COPY PDE FROM RPF.py
+# !!! COPY PDE FROM RPF_paper.py
 def pde(inputs, outputs):
     
     # auto-differentiation
@@ -323,7 +323,7 @@ SRPintegrand = pgrid2**2 * vnew2 / (gnew2**2-1) / (gnew2-1)**2 * Pnew2
 #########################
 
 # RPF at specified parameters
-plt.rcParams.update({'font.size': 18})
+
 fig1, ax1 = plt.subplots(num=1,nrows=1,ncols=1, clear=True)
 fig1.set_tight_layout(True)
 cs1 = ax1.contourf(mecSQ*(ggrid-1), xigrid, Pnew, levels=50, cmap='jet')
