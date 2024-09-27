@@ -28,6 +28,7 @@ pts = 100000 # number of points sampled in the domain
 # Setting ranges of physics parameters that the PINN will learn
 
 # electric field normalized to connor-hastie electric field
+# Electric field is in negative units
 EFMin = -10
 EFMax = -1
 
@@ -129,13 +130,8 @@ def main():
     geom = dde.geometry.Hypercube([pMin, xiMin, 0, 0, 0], [pMax, xiMax, 1, 1, 1])
 
     # construct neural network
-<<<<<<< HEAD
     numNeurons = 32 # number of neurons for each hidden layer
     numLayers  = 4  # number of hidden layers
-=======
-    numNeurons = 64 # number of neurons for each hidden layer
-    numLayers  = 6  # number of hidden layers
->>>>>>> 232e6409b4b3a60e92a736ab5acbbc31e75a9da9
     net = dde.maps.FNN([5] + [numNeurons] * numLayers + [1], "tanh", "Glorot normal") # 5 corresponds to the number of dimensions
 
     # apply additional layer on network
@@ -214,20 +210,20 @@ def main():
 
 
         # # routine that adds additional points at maximum of the residual of the PDE
-        # numPointsAdd = 100000 # number of additional points to add
-        # xpp = geom.random_points(numPointsAdd)
+        numPointsAdd = 100000 # number of additional points to add
+        xpp = geom.random_points(numPointsAdd)
 
-        # # predict the model
-        # f = model.predict(xpp, operator=pde)
+        # predict the model
+        f = model.predict(xpp, operator=pde)
 
-        # # evaluate residual
-        # err_eq_f = np.absolute(f)
+        # evaluate residual
+        err_eq_f = np.absolute(f)
 
-        # # Add additional points
-        # for i in range(0,10):
-        #     x_id = np.argmax(err_eq_f)          # index to add points
-        #     data.add_anchors(xpp[x_id])         # add additional points
-        #     err_eq_f = np.delete(err_eq_f,x_id) # delete previous index
+        # Add additional points
+        for i in range(0,10):
+            x_id = np.argmax(err_eq_f)          # index to add points
+            data.add_anchors(xpp[x_id])         # add additional points
+            err_eq_f = np.delete(err_eq_f,x_id) # delete previous index
 
 if __name__ == "__main__":
     main()
