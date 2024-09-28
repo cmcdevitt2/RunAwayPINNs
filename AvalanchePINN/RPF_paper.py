@@ -1,6 +1,6 @@
 '''
 This script uses a tailored physics-informed neural network to solve the adjoint of the Fokker-Planck
-Equation. Details about this script is provied in https://arxiv.org/abs/2403.04948
+Equation. Details about this script is provied in https://doi.org/10.1017/S0022377824000679
 '''
 
 #importing relevant libraries
@@ -22,8 +22,9 @@ epochsADAM = 5000 # number of epochs for the adam optimizer
 epochsBFGS = 10000 # number of epochs for each LBFGS-B optimizer training period
 NumBFGS = 100 # number of LBFGS-B training periods
 lr = 5.e-4 # learning rate for the adam optimizer
-pts = 100000 # number of points sampled in the domain
-
+ptsTrain = 100000 # number of points sampled in the domain
+ptsTest = 100000 # number of test points
+ptsBoundary = 10000 # number of points sampled along domain boundary
 
 # Setting ranges of physics parameters that the PINN will learn
 
@@ -55,6 +56,14 @@ pMin = np.sqrt(gMin**2-1)
 # pitch-angle
 xiMax = 1
 xiMin = -1
+
+# construct neural network
+numNeurons = 32 # number of neurons for each hidden layer
+numLayers  = 4  # number of hidden layers
+numInputs = 5
+numOutputs = 1
+activation = 'tanh'
+
 
 # Function that defines the PDE to be learned by the PINN
 def pde(inputs, outputs):
@@ -93,7 +102,7 @@ def pde(inputs, outputs):
 
     # Constructing the loss term, scaled by the inverse of the collisional drag to prevent
     # divergence at low momentum
-    loss = (p**2/(1+p**2)) * ( ElecticFieldTerms + CollisionalTerms + RadiationTerms ) #/ -Ephi
+    loss = (1/C_F) * ( ElecticFieldTerms + CollisionalTerms + RadiationTerms )
 
     return loss
 
@@ -125,65 +134,86 @@ def output_transform(inputs, outputs):
 
     return tf.concat((Prob), axis=1)
 
+# boundary function to enforce a dirchlet boundary condition at p_max
+def boundary(inputs, on_boundary):
+
+    # unfolding the inputs
+    p = inputs[0]
+    xi = inputs[1]
+    EFNorm = inputs[2] # normalized electric field to be between 0 and 1
+    alphaNorm = inputs[4] # normalied synchrotron strength to be between 0 and 1
+
+    # un-normalizing inputs
+    Ephi = EFMin + ( EFMax - EFMin ) * EFNorm
+    alpha = alphaMin + ( alphaMax - alphaMin ) * alphaNorm
+
+    # energy flux equation
+    Up = xi*Ephi - (gMax**2/pMax**2) - alpha*gMax*pMax*(1-xi**2)
+
+    # return boolean if p = p_max and U_p > 0
+    return on_boundary and np.isclose(p, pMax) and Up > 0
+
+# defining geometry for the PINN
+geom = dde.geometry.Hypercube([pMin, xiMin, 0, 0, 0], 
+                              [pMax, xiMax, 1, 1, 1])
+
+net = dde.maps.FNN([numInputs] + [numNeurons] * numLayers + [numOutputs], activation, "Glorot normal") # 5 corresponds to the number of dimensions
+
+# apply additional layer on network
+net.apply_output_transform(output_transform)
+
+# applying the Dirchlet BC at p_max
+bc_pMax = dde.DirichletBC(
+    geom, # geometry to apply it to
+    lambda x: 1 + 0*x[:, 1:2], # sets the RPF to be 1 if boundary=True
+    boundary,
+    component=0
+)
+
+# constructing all losses to be minimized by the PINN (PDE loss is already included)
+# and does not need to be added
+losses = [bc_pMax]
+
+# Store parameters for plotting script
+class Params:
+    def __init__(self):
+        self.EFMin = EFMin
+        self.EFMax = EFMax
+
+        self.ZeffMin = ZeffMin
+        self.ZeffMax = ZeffMax
+
+        self.alphaMin = alphaMin
+        self.alphaMax = alphaMax
+
+        self.EnergyMaxeV = EnergyMaxeV
+        self.EnergyMineV = EnergyMineV
+
+        self.xiMax = xiMax
+        self.xiMin = xiMin
+        
+        self.pde = pde
+        self.output_transform = output_transform
+        self.geom = geom
+        self.net = net
+
+
 def main():
-    # defining geometry for the PINN
-    geom = dde.geometry.Hypercube([pMin, xiMin, 0, 0, 0], [pMax, xiMax, 1, 1, 1])
-
-    # construct neural network
-    numNeurons = 32 # number of neurons for each hidden layer
-    numLayers  = 4  # number of hidden layers
-    net = dde.maps.FNN([5] + [numNeurons] * numLayers + [1], "tanh", "Glorot normal") # 5 corresponds to the number of dimensions
-
-    # apply additional layer on network
-    net.apply_output_transform(output_transform)
-    
-    # boundary function to enforce a dirchlet boundary condition at p_max
-    def boundary(inputs, on_boundary):
-
-        # unfolding the inputs
-        p = inputs[0]
-        xi = inputs[1]
-        EFNorm = inputs[2] # normalized electric field to be between 0 and 1
-        alphaNorm = inputs[4] # normalied synchrotron strength to be between 0 and 1
-
-        # un-normalizing inputs
-        Ephi = EFMin + ( EFMax - EFMin ) * EFNorm
-        alpha = alphaMin + ( alphaMax - alphaMin ) * alphaNorm
-
-        # energy flux equation
-        Up = xi*Ephi - (gMax**2/pMax**2) - alpha*gMax*pMax*(1-xi**2)
-
-        # return boolean if p = p_max and U_p > 0
-        return on_boundary and np.isclose(p, pMax) and Up > 0
-    
-    # applying the Dirchlet BC at p_max
-    bc_pMax = dde.DirichletBC(
-        geom, # geometry to apply it to
-        lambda x: 1 + 0*x[:, 1:2], # sets the RPF to be 1 if boundary=True
-        boundary,
-        component=0
-    )
-    
-    # constructing all losses to be minimized by the PINN (PDE loss is already included)
-    # and does not need to be added
-    losses = [bc_pMax]
-
     # Constructing data object which the PINN will use for the model
     data = dde.data.PDE(
         geom,                            # geometry
         pde,                             # pde
         losses,                          # loss terms
-        num_domain=pts,                  # number of points in the domain
-        num_boundary=10000,              # number of points on the boundary of the geometry
-        num_test=pts,                    # number of test points on the domain
+        num_domain=ptsTrain,                  # number of points in the domain
+        num_boundary=ptsBoundary,              # number of points on the boundary of the geometry
+        num_test=ptsTest,                    # number of test points on the domain
         train_distribution='Hammersley', # training point distribution
     )
 
     # constructing PINN model
     model = dde.Model(data, net)
 
-    # Compiling the model with the adam optimizer
-    model.compile("adam", lr=lr)
+    model.compile("adam", lr=lr)# Compiling the model with the adam optimizer
     
     # Training the PINN with the adam optimizer
     losshistory, train_state = model.train(epochs=epochsADAM, model_save_path = './model/model.ckpt')
@@ -191,9 +221,7 @@ def main():
 
     # Looping through each LBFGS-B optimizer training period
     for i in range(0,NumBFGS):
-        
-        # compiling the model with the L-BFGS-B optimizer
-        model.compile("L-BFGS-B")
+        model.compile("L-BFGS-B")# compiling the model with the L-BFGS-B optimizer
 
         # Training the model
         model.train_step.optimizer_kwargs = {'options': {'maxcor': 100,
@@ -206,24 +234,6 @@ def main():
         # Saving loss and model at end of training period
         losshistory, train_state = model.train(model_save_path = './model/model.ckpt')
         dde.saveplot(losshistory, train_state, issave=True, isplot=False)
-
-
-
-        # # routine that adds additional points at maximum of the residual of the PDE
-        numPointsAdd = 100000 # number of additional points to add
-        xpp = geom.random_points(numPointsAdd)
-
-        # predict the model
-        f = model.predict(xpp, operator=pde)
-
-        # evaluate residual
-        err_eq_f = np.absolute(f)
-
-        # Add additional points
-        for i in range(0,10):
-            x_id = np.argmax(err_eq_f)          # index to add points
-            data.add_anchors(xpp[x_id])         # add additional points
-            err_eq_f = np.delete(err_eq_f,x_id) # delete previous index
-
+        
 if __name__ == "__main__":
     main()
