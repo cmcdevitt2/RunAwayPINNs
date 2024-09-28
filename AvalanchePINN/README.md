@@ -4,3 +4,6 @@ This directory contains a physics informed neural network (PINN) that predicts t
 
 To launch the script that trains the PINN, simply run the command **DDEBACKEND=tensorflow.compat.v1 RPF_paper.py**, assuming the environment created in the parent directory of this repo is activated, and the **DDEBACKEND** must be **tensorflow.compat.v1**. **If the directory "model" is not created in the working directory, the script will throw an error when saving the model during training**. If the correct libraries and modules are not loaded, the script will typically either throw an error or run inefficiently (i.e the GPU will not be utilized). An example of what the output should look like is shown below:
 ![TrainingOutput](TrainingOutput.png)
+
+Once the PINN has trained. Run the following command **DDEBACKEND=tensorflow.compat.v1 RPF_paper.py** to compute the RPF, residual, and avalanche growth rate for a chosen set of paramters $E_\Vert$,$Z_{eff}$,$\alpha$. The time per prediction in computing the RPF and the time taken to evaluate the avalanche growth rate is also computed. An example output of the plotting script is shown below:
+![PlottingOutput](PlottingOutput.png)
