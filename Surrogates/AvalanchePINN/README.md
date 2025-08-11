@@ -1,8 +1,10 @@
+# AvalanchePINN
 This directory contains a physics informed neural network (PINN) that predicts the parametric dependence of the exponential "avalanche" growth rate of relativistic electrons (runaway electrons, RE) $\gamma_{av}$, on the plasma's parallel electric field strength $E_\Vert$, effective charge $Z_{eff}$, and synchrotron radiation strength $\alpha$. Further details on the formulation of the PINN is found in the [paper](https://doi.org/10.1017/S0022377824000679). 
 
 We note that due to the decreasing support of Tensorflow ([Nvidia no longer will provide pre-built containers](https://docs.nvidia.com/deeplearning/frameworks/tensorflow-release-notes/rel-25-02.html)), we have gone ahead and converted the backend of the PINN script from Tensorflow to PyTorch, which does not impact the overall performance, as simple tensor operations are done for this script, and the L-BFGS-B optimizer is from Scipy, which is independent of the backend.
 
-To launch the script that trains the PINN, simply run the command ```DDEBACKEND=pytorch python TrainAvalanchePINN.py```, assuming the environment created in the parent directory of this repo is activated. Assuming the random seed and other parameters were not change, the output should look like what is shown below:
+# Getting started and example solution
+To launch the script that trains the PINN, simply run the command ```DDEBACKEND=pytorch python TrainAvalanchePINN.py```, assuming the environment created in the parent directory of this repo is activated. Assuming the random seed and other parameters were not change, the output should look like what is shown below, where this example trained till 25,000 iterations. Here, the first 15,000 iterations are with the ADAM optimizer, and the remaining 10,000 iterations are with the L-BFGS-B optimizer.
 ````
 Using backend: pytorch
 Other supported backends: tensorflow.compat.v1, tensorflow, jax, paddle.
@@ -55,7 +57,7 @@ Step      Train loss              Test loss               Test metric
 ````
 
 
-Once the PINN has trained. Run the following command ```DDEBACKEND=pytorch python ComputeAvalanchePINN_Results.py``` to compute the RPF, residual, and avalanche growth rate for a chosen set of paramters $E_\Vert$,$Z_{eff}$,$\alpha$. The time per prediction in computing the RPF and the time taken to evaluate the avalanche growth rate is also computed. An example output of the plotting script is shown below:
+Once the PINN has trained. Run the following command ```DDEBACKEND=pytorch python PredictAvalanchePINN.py``` to compute the RPF, residual, and avalanche growth rate for a chosen set of paramters $(E_\Vert,Z_{eff},\alpha)$. The time per prediction in computing the RPF and the time taken to evaluate the avalanche growth rate is also computed. An example output of the plotting script is shown below:
 
 ```
 Using backend: pytorch
