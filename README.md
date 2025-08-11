@@ -13,12 +13,12 @@ We recommend GPUs (Nvidia GPUs have only been tested) for training the PINNs, ho
 
 **Simulation setup:**  50,000 training points and 3 hidden layers with 32 neurons per layer, such that the model fits on all hardware. The simulation was ran on both the ADAM optimizer from PyTorch and the SOAP optimizer from the pytorch-optimizer library, which represent first order and second order optimization routines for deep learning, respectively.
 
-| Device   | Precision | Runtime (ADAM) | Runtime (SOAP) |
+| Device   | Precision | ~Runtime (ADAM) | ~Runtime (SOAP) |
 | :------ | :------: | :------: | :------: |
-| (CPU) [Apple M1 Pro 16GB](https://support.apple.com/en-us/111902)   | Float32   | Right    |Right    |
+| (CPU) [Apple M1 Pro 16GB](https://support.apple.com/en-us/111902)   | Float32   | 12m    |Right    |
 | (GPU) [Apple M1 Pro 16GB](https://support.apple.com/en-us/111902)   | Float32   | 3m   |Right    |
-| (CPU) [AMD "Turin" EPYC 9655P](https://www.amd.com/en/products/processors/server/epyc/9005-series/amd-epyc-9655p.html)  | Float64   | 1m 46s   |Right    |
-| (GPU) [Nvidia L4 24GB](https://www.nvidia.com/en-us/data-center/l4/)  | Float64   | 1m 46s   |Right    |
+| (CPU) [AMD "Turin" EPYC 9655P](https://www.amd.com/en/products/processors/server/epyc/9005-series/amd-epyc-9655p.html)  | Float64   | 18m   |Right    |
+| (GPU) [Nvidia L4 24GB](https://www.nvidia.com/en-us/data-center/l4/)  | Float64   | 3m   |Right    |
 | (GPU) [Nvidia L40S 48GB](https://www.nvidia.com/en-us/data-center/l40s/)  | Float64   | Cell C   |Right    |
 | (GPU) [Nvidia A100 40GB](https://www.nvidia.com/en-us/data-center/a100/)  | Float64   | Cell C   |Right    |
 | (GPU) [Nvidia A100 80GB](https://www.nvidia.com/en-us/data-center/a100/)  | Float64   | Cell C   |Right    |
