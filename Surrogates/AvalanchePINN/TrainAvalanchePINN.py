@@ -199,7 +199,7 @@ def main():
     for i in range(0,NumBFGS):
         model.compile("L-BFGS-B")# compiling the model with the L-BFGS-B optimizer
 
-        # Training the model
+        # Setting optimizer settings
         model.train_step.optimizer_kwargs = {'options': {'maxcor': 100,
                                                          'ftol': 1.0 * np.finfo(float).eps, # prevents early stopping
                                                          'gtol': 1.0 * np.finfo(float).eps, # prevents early stopping
@@ -207,7 +207,7 @@ def main():
                                                          'maxfun':  epochsBFGS,
                                                          'maxls': 200}}
 
-        # Saving loss and model at end of training period
+        # Train model and save loss and model at end of training period
         losshistory, train_state = model.train(model_save_path = './model/model.ckpt')
         dde.saveplot(losshistory, train_state, issave=True, isplot=False)
         
