@@ -17,7 +17,7 @@ plt.rcParams.update({'font.size': 18})
 save_path_root = "./"
 
 # Specify which model to load
-ModelToLoad = 15000
+ModelToLoad = 677083
 
 # Provide path to model, training distribution and loss history
 ckpt_save_path  = str(save_path_root) + f"./model.ckpt-{ModelToLoad}.pt"

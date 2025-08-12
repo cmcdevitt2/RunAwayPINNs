@@ -8,20 +8,26 @@ import deepxde as dde             # DeepXDE
 import numpy as np                # Numpy
 from deepxde.backend import torch # pytorch
 
-
-dde.config.set_default_float("float64") # DeepXDE requires this to be set for L-BFGS-B
+# Config setting
+epochsLBFGSB = 50_000 # number of epochs for the LBFGSB optimizer
 dde.config.set_random_seed(1234)        # Setting fixed random number generator seed
-
+dde.config.set_default_float("float64") # DeepXDE requires this to be set for L-BFGS-B
+dde.optimizers.config.set_LBFGS_options(maxiter=epochsLBFGSB,            # max iterations per training period
+                                       gtol = 1.0 * np.finfo(float).eps, # Tolerance
+                                       ftol = 1.0 * np.finfo(float).eps, # Tolerance
+                                       maxcor = 100,                     # optimizer hyperparameter
+                                       maxfun = epochsLBFGSB,            # maximum function evaluatations
+                                       maxls = 200                       # maximum number of line searches
+                                       )
 # Physical constants
 mecSQ = 511e3 # electron rest mass in units eV
 
 # Numerical parameters
-epochsADAM  = 0_000    # number of epochs for the adam optimizer
-epochsBFGS  = 10_000    # number of epochs for each LBFGS-B optimizer training period
+epochsADAM  = 15_000     # number of epochs for the adam optimizer
 NumBFGS     = 100       # number of LBFGS-B training periods
 lr          = 5.e-4     # learning rate for the adam optimizer
-ptsTrain    = 1_000_000 # number of points sampled in the domain
-ptsTest     = 1_000_000 # number of test points
+ptsTrain    = 500_000    # number of points sampled in the domain
+ptsTest     = 500_000    # number of test points
 ptsBoundary = 10_000    # number of points sampled along domain boundary
 
 '''
@@ -49,8 +55,8 @@ pMin, pMax = np.sqrt(gMin**2-1), np.sqrt(gMax**2-1)
 xiMin, xiMax = -1.0, 1.0
 
 # neural network parameters
-numNeurons = 64     # number of neurons for each hidden layer
-numLayers  = 6      # number of hidden layers
+numNeurons = 32     # number of neurons for each hidden layer
+numLayers  = 4      # number of hidden layers
 numInputs  = 5      # number of inputs
 numOutputs = 1      # number of outputs
 activation = 'tanh' # activation function
@@ -199,16 +205,8 @@ def main():
     for i in range(0,NumBFGS):
         model.compile("L-BFGS-B")# compiling the model with the L-BFGS-B optimizer
 
-        # Setting optimizer settings
-        model.train_step.optimizer_kwargs = {'options': {'maxcor': 100,
-                                                         'ftol': 1.0 * np.finfo(float).eps, # prevents early stopping
-                                                         'gtol': 1.0 * np.finfo(float).eps, # prevents early stopping
-                                                         'maxiter': epochsBFGS,
-                                                         'maxfun':  epochsBFGS,
-                                                         'maxls': 200}}
-
         # Train model and save loss and model at end of training period
-        losshistory, train_state = model.train(model_save_path = './model/model.ckpt')
+        losshistory, train_state = model.train(model_save_path = './model.ckpt')
         dde.saveplot(losshistory, train_state, issave=True, isplot=False)
         
 if __name__ == "__main__":

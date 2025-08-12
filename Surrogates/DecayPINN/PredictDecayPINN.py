@@ -21,7 +21,7 @@ plt.rcParams.update({'font.size': 18})
 save_path_root = "./"
 
 # Specify which model to load
-ModelToLoad = 15000
+ModelToLoad = 931521
 
 # Provide path to model, training distribution and loss history
 ckpt_save_path  = str(save_path_root) + f"./model.ckpt-{ModelToLoad}.pt"
@@ -226,7 +226,7 @@ for i in range(len(tVal)):
 
 # Computes evolution of primary n_RE
 
-numt = 20
+numt = 50
 tgrid = np.linspace(tMin,tMax,numt)
 nREvst = np.zeros(numt)
 fe = Computefe(pgridInt,xigridInt)
@@ -263,27 +263,15 @@ ax[2,1].set_xlabel("Energy [MeV]")
 ax[2,1].set_title("Training Points")
 ax[2,1].set_xticks([1,2,3,4,5])
 
-
-# Removes redundant values in test training array
-testPDEClean = np.copy(testPDE)
-for i in range(1,len(lossPDE)):
-    if np.isclose(lossPDE[i], testPDE[i]):
-        testPDEClean[i] = 'nan'
-
-testBCClean = np.copy(testBC)
-for i in range(1,len(lossBC)):
-    if np.isclose(lossBC[i], testBC[i]):
-        testBCClean[i] = 'nan'
-
 ax[2,2].plot(1e-3*steps, lossPDE, label='training PDE', linestyle='-',color='blue',linewidth=2)
 ax[2,2].plot(1e-3*steps, lossBC, label='training BC', linestyle='-',color='red',linewidth=2)
-ax[2,2].plot(1e-3*steps, testPDEClean, 'xb', label='test PDE')
-ax[2,2].plot(1e-3*steps, testBCClean, 'xr', label='test BC')
+ax[2,2].plot(1e-3*steps, testPDE, linestyle='--',color='blue', label='test PDE')
+ax[2,2].plot(1e-3*steps, testBC, linestyle='--',color='red', label='test BC')
 
 ax[2,2].set_xlabel("Thousands of epochs")
 ax[2,2].set_title("Loss History")
 ax[2,2].set_yscale("log")
-ax[2,2].set_ylim(1e-9, 1e3)
-ax[2,2].legend(loc='upper right',fontsize=14)
+ax[2,2].set_ylim(np.min(testBC)*0.01, 1e3)
+ax[2,2].legend(loc='upper right',fontsize=14,ncol=2,labelspacing=0.1,handletextpad=0.1)
 
 fig.savefig('DecayPINN_Results')

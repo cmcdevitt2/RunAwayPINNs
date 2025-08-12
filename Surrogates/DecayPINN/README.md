@@ -4,8 +4,7 @@ This directory contains a physics-informed nerual network (PINN) that predicts t
 We note that due to the decreasing support of Tensorflow ([Nvidia no longer will provide pre-built containers](https://docs.nvidia.com/deeplearning/frameworks/tensorflow-release-notes/rel-25-02.html)), we have gone ahead and converted the backend of the PINN script from Tensorflow to PyTorch, which does not impact the overall performance, as simple tensor operations are done for this script, and the L-BFGS-B optimizer is from Scipy, which is independent of the backend.
 
 # Getting started and example solution
-To launch the script that trains the PINN, simply run the command ```DDE_BACKEND=pytorch python TrainDecayPINN.py```, assuming the environment created in the parent directory is created. Assuming the existing script is ran exactly as is, an example solution is shown below, where the PINN trained for 25,000 iterations. Here, the first 15,000 iterations are with the ADAM optimizer, and the remaining 10,000 iterations are with the L-BFGS-B optimizer. We note that the example script uses approximately 10 GB of GPU memory,
-so please use a GPU that has sufficient memory to run the script as is. Below is an output of the training script:
+To launch the script that trains the PINN, simply run the command ```DDE_BACKEND=pytorch python TrainDecayPINN.py```, assuming the environment created in the parent directory is created. Assuming the existing script is ran exactly as is, an example solution is shown below, where the PINN trained for [REPLACE_WHEN_DONE] iterations. Here, the first 15,000 iterations are with the ADAM optimizer, and the remaining iterations are with the L-BFGS-B optimizer. We note that the example script uses approximately 10 GB of GPU memory, so please use a GPU that has sufficient memory to run the script as is. Below is an output of the training script:
 
 ```
 Using backend: pytorch

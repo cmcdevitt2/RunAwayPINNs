@@ -10,18 +10,26 @@ import numpy as np                # Numpy
 from deepxde.backend import torch # pytorch
 from scipy.special import kn      # scipy bessel function
 
-dde.config.set_default_float("float64") # DeepXDE requires this to be set for L-BFGS-B
+# Config setting
+epochsLBFGSB = 50_000 # number of epochs for the LBFGSB optimizer
 dde.config.set_random_seed(1234)        # Setting fixed random number generator seed
+dde.config.set_default_float("float64") # DeepXDE requires this to be set for L-BFGS-B
+dde.optimizers.config.set_LBFGS_options(maxiter=epochsLBFGSB,            # max iterations per training period
+                                       gtol = 1.0 * np.finfo(float).eps, # Tolerance
+                                       ftol = 1.0 * np.finfo(float).eps, # Tolerance
+                                       maxcor = 100,                     # optimizer hyperparameter
+                                       maxfun = epochsLBFGSB,            # maximum function evaluatations
+                                       maxls = 200                       # maximum number of line searches
+                                       )
 
 # Physical constants
 mecSQ = 511e3 # electron rest mass in units eV
 
 # Numerical parameters
-epochsADAM  = 0_000     # number of epochs for the adam optimizer
-epochsBFGS  = 10_000    # number of epochs for each LBFGS-B optimizer training period
+epochsADAM  = 15_000     # number of epochs for the adam optimizer
 NumBFGS     = 100       # number of LBFGS-B training periods
 lr          = 5.e-4     # learning rate for the adam optimizer
-pts         = 200000    # number of training and test points
+pts         = 500_000    # number of training and test points
 
 '''
 Setting ranges of physics parameters that the PINN will learn
@@ -41,7 +49,7 @@ dp  = 0.1*pMax # sets width of transition region in initial RPF
 dP = 0.15 # sets width of normalization for PINN in inital condition
 
 # neural network parameters
-numNeurons = 64     # number of neurons for each hidden layer
+numNeurons = 32     # number of neurons for each hidden layer
 numLayers  = 4      # number of hidden layers
 numInputs  = 6      # number of inputs
 numOutputs = 1      # number of outputs
@@ -202,7 +210,7 @@ def main():
     model.compile("adam", lr=lr, loss=loss, loss_weights=loss_weights)
 
     # Training the PINN with the adam optimizer and save progress
-    losshistory, train_state = model.train(iterations=epochsADAM, model_save_path = './model.ckpt')
+    losshistory, train_state = model.train(iterations=epochsADAM, model_save_path = './dcyModel/model.ckpt')
     dde.saveplot(losshistory, train_state, issave=True, isplot=False)
 
     # Resample training points every 500 iterations
@@ -214,16 +222,8 @@ def main():
         # compiling the model with the L-BFGS-B optimizer
         model.compile("L-BFGS-B", loss=loss, loss_weights=loss_weights)
 
-        # Setting optimizer settings
-        model.train_step.optimizer_kwargs = {'options': {'maxcor': 100,
-                                                         'ftol': 1.0 * np.finfo(float).eps,
-                                                         'gtol': 1.0 * np.finfo(float).eps,
-                                                         'maxiter': epochsBFGS,
-                                                         'maxfun':  epochsBFGS,
-                                                         'maxls': 200}}
-
         # Train model and save loss and model at end of training period
-        losshistory, train_state = model.train(model_save_path = './model.ckpt',callbacks=[resampler])
+        losshistory, train_state = model.train(model_save_path = './dcyModel/model.ckpt',callbacks=[resampler])
         dde.saveplot(losshistory, train_state, issave=True, isplot=False)
 
         
