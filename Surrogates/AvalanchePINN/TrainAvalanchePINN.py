@@ -26,8 +26,8 @@ mecSQ = 511e3 # electron rest mass in units eV
 epochsADAM  = 15_000     # number of epochs for the adam optimizer
 NumBFGS     = 100       # number of LBFGS-B training periods
 lr          = 5.e-4     # learning rate for the adam optimizer
-ptsTrain    = 500_000    # number of points sampled in the domain
-ptsTest     = 500_000    # number of test points
+ptsTrain    = 1_000_000    # number of points sampled in the domain
+ptsTest     = 1_000_000    # number of test points
 ptsBoundary = 10_000    # number of points sampled along domain boundary
 
 '''
@@ -55,8 +55,8 @@ pMin, pMax = np.sqrt(gMin**2-1), np.sqrt(gMax**2-1)
 xiMin, xiMax = -1.0, 1.0
 
 # neural network parameters
-numNeurons = 32     # number of neurons for each hidden layer
-numLayers  = 4      # number of hidden layers
+numNeurons = 64     # number of neurons for each hidden layer
+numLayers  = 6      # number of hidden layers
 numInputs  = 5      # number of inputs
 numOutputs = 1      # number of outputs
 activation = 'tanh' # activation function
