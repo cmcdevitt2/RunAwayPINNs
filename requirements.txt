@@ -1,0 +1,7 @@
+--extra-index-url https://download.pytorch.org/whl/cu129
+torch
+torchvision 
+torchaudio
+matplotlib
+pytorch-optimizer
+scikit-optimize
