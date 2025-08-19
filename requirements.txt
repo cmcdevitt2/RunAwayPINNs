@@ -5,3 +5,4 @@ torchaudio
 matplotlib
 pytorch-optimizer
 scikit-optimize
+tqdm
