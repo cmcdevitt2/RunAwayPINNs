@@ -5,8 +5,8 @@ let residualSession = null;
 let running = false;
 let pending = false;
 
-const NX = 100;
-const NY = 100;
+const NX = 128;
+const NY = 128;
 
 let ENERGY_MIN = 1.0e4;
 let ENERGY_MAX = 5.0e6;
@@ -24,19 +24,20 @@ let ZEFF_MIN = 1.0;
 let ZEFF_MAX = 10.0;
 let ALPHA_MIN = 0.0;
 let ALPHA_MAX = 0.2;
-let RESIDUAL_ONNX_BATCH = 4096;
+let RESIDUAL_ONNX_BATCH = 8192;
 
 const FIG_WIDTH = 1700;
 const FIG_HEIGHT = 1120;
 
 const PLOT_MARGIN = {
   left: 220,
-  right: 255,
+  right: 300,
   top: 132,
   bottom: 195,
 };
 
-const COLORBAR_WIDTH = 74;
+const COLORBAR_WIDTH_PROB = 74;
+const COLORBAR_WIDTH_RES = 120;
 const COLORBAR_GAP = 38;
 const COLORBAR_FONT = "34px sans-serif";
 
@@ -534,6 +535,8 @@ async function runInference() {
       title: "Runaway probability",
       colorbarMaxText: "1",
       colorbarTopTextColor: "white",
+      colorbarWidth: COLORBAR_WIDTH_PROB,
+      colorbarFont: "32px sans-serif",
     });
 
     const vmax = Math.max(percentile(rAbs, 0.99), 1.0e-16);
@@ -545,6 +548,8 @@ async function runInference() {
       title: "PDE residual magnitude",
       colorbarMaxText: vmax.toExponential(1),
       colorbarTopTextColor: "black",
+      colorbarWidth: COLORBAR_WIDTH_RES,
+      colorbarFont: "32px sans-serif",
     });
 
     cleanPlotCards();
@@ -620,13 +625,14 @@ function drawHeatmap(canvasId, values, nx, ny, options) {
   drawInlineColorbar(ctx, {
     x: plotX + plotW + COLORBAR_GAP,
     y: plotY,
-    width: COLORBAR_WIDTH,
+    width: options.colorbarWidth ?? COLORBAR_WIDTH_PROB,
     height: plotH,
     min,
     max,
     cmap: options.cmap,
     maxText: options.colorbarMaxText ?? max.toExponential(1),
     topTextColor: options.colorbarTopTextColor ?? "white",
+    font: options.colorbarFont ?? COLORBAR_FONT,
   });
 }
 
@@ -708,7 +714,7 @@ function drawInlineColorbar(ctx, spec) {
 
   ctx.save();
 
-  ctx.font = COLORBAR_FONT;
+  ctx.font = spec.font ?? COLORBAR_FONT;
   ctx.textAlign = "left";
 
   ctx.textBaseline = "top";
