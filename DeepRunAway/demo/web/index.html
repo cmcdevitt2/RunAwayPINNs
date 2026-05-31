@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Parametric RPF PINN Demo</title>
+    <style>
+      body {
+        margin: 0;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #101318;
+        color: #f2f4f8;
+      }
+      main {
+        max-width: 1280px;
+        margin: 0 auto;
+        padding: 24px;
+      }
+      h1 { margin-bottom: 4px; }
+      .subtitle { color: #b8c0cc; margin-top: 0; }
+      .controls {
+        display: grid;
+        grid-template-columns: 170px 1fr 90px;
+        gap: 10px 14px;
+        align-items: center;
+        padding: 16px;
+        background: #181d25;
+        border: 1px solid #303846;
+        border-radius: 12px;
+        margin: 18px 0;
+      }
+      label { color: #d5dce8; }
+      input[type="range"] { width: 100%; }
+      select {
+        background: #0f141b;
+        color: #f2f4f8;
+        border: 1px solid #3b4658;
+        border-radius: 8px;
+        padding: 8px;
+      }
+      .plots {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 18px;
+      }
+      .panel {
+        background: #181d25;
+        border: 1px solid #303846;
+        border-radius: 12px;
+        padding: 14px;
+      }
+      .panel h2 { margin: 0 0 10px 0; font-size: 18px; }
+      .canvas-wrap {
+        display: grid;
+        grid-template-columns: 1fr 36px;
+        gap: 8px;
+        align-items: stretch;
+      }
+      canvas {
+        width: 100%;
+        height: auto;
+        image-rendering: pixelated;
+        border-radius: 8px;
+        background: #000;
+      }
+      canvas.colorbar { width: 36px; height: 100%; }
+      .axis-note { color: #adb6c4; font-size: 13px; margin-top: 8px; }
+      #status, #stats {
+        color: #c8d3e2;
+        margin: 10px 0;
+      }
+      @media (max-width: 900px) {
+        .plots { grid-template-columns: 1fr; }
+        .controls { grid-template-columns: 140px 1fr 80px; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Parametric runaway probability function PINN</h1>
+      <p class="subtitle">Interactive ONNX Runtime demo for P(E, ξ; |Eφ|, Zeff, α) and its Fokker–Planck residual.</p>
+
+      <section class="controls">
+        <label for="nx">Energy grid</label>
+        <input id="nx" type="range" min="80" max="320" step="20" value="180" />
+        <span id="nxValue">180</span>
+
+        <label for="ny">Pitch grid</label>
+        <input id="ny" type="range" min="60" max="240" step="20" value="120" />
+        <span id="nyValue">120</span>
+
+        <label for="evert">|Eφ|</label>
+        <input id="evert" type="range" min="1" max="20" step="0.5" value="10" />
+        <span id="evertValue">10.0</span>
+
+        <label for="zeff">Zeff</label>
+        <input id="zeff" type="range" min="1" max="5" step="0.1" value="1" />
+        <span id="zeffValue">1.0</span>
+
+        <label for="alpha">α</label>
+        <input id="alpha" type="range" min="0" max="0.1" step="0.002" value="0" />
+        <span id="alphaValue">0.000</span>
+
+        <label for="backendMode">backend</label>
+        <select id="backendMode">
+          <option value="webgpu-wasm">forward: WebGPU, residual: WASM</option>
+          <option value="webgpu-webgpu">forward: WebGPU, residual: WebGPU</option>
+          <option value="wasm-webgpu">forward: WASM, residual: WebGPU</option>
+          <option value="wasm-wasm" selected>forward: WASM, residual: WASM</option>
+        </select>
+        <span></span>
+      </section>
+
+      <div id="status">Loading models...</div>
+      <div id="stats"></div>
+
+      <section class="plots">
+        <div class="panel">
+          <h2>Runaway probability P</h2>
+          <div class="canvas-wrap">
+            <canvas id="probCanvas"></canvas>
+            <canvas id="probColorbar" class="colorbar"></canvas>
+          </div>
+          <div class="axis-note">x-axis: log energy from 10 keV to 5 MeV, y-axis: pitch angle ξ ∈ [-1, 1]</div>
+        </div>
+        <div class="panel">
+          <h2>PDE residual |R|</h2>
+          <div class="canvas-wrap">
+            <canvas id="resCanvas"></canvas>
+            <canvas id="resColorbar" class="colorbar"></canvas>
+          </div>
+          <div class="axis-note">Residual color scale is clipped at the 99th percentile for readability.</div>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

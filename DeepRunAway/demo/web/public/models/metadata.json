@@ -1,0 +1,48 @@
+{
+  "model": "parametric runaway probability function PINN",
+  "inputs": [
+    "p_norm",
+    "xi_norm",
+    "evert_norm",
+    "zeff_norm",
+    "alpha_norm"
+  ],
+  "outputs": {
+    "forward": [
+      "P"
+    ],
+    "residual": [
+      "R"
+    ]
+  },
+  "parameter_ranges": {
+    "Evert": [
+      1.0,
+      10.0
+    ],
+    "Zeff": [
+      1.0,
+      10.0
+    ],
+    "alpha": [
+      0.0,
+      0.2
+    ],
+    "energy_eV": [
+      10000.0,
+      5000000.0
+    ],
+    "xi": [
+      -1.0,
+      1.0
+    ]
+  },
+  "models": {
+    "forward": "rpf_forward.onnx",
+    "residual": "rpf_residual.onnx"
+  },
+  "onnx": {
+    "forward_batch": "dynamic",
+    "residual_batch_size": 4096
+  }
+}
