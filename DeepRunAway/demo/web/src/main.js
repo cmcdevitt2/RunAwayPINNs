@@ -1129,7 +1129,6 @@ main().catch((err) => {
 
   syncColorbarHeight("probCanvas", "probColorbar");
   syncColorbarHeight("resCanvas", "resColorbar");
-}
 
 function syncColorbarHeight(plotCanvasId, colorbarCanvasId) {
   const plotCanvas = maybe$(plotCanvasId);
