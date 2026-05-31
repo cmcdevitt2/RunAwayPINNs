@@ -37,7 +37,7 @@ const PLOT_MARGIN = {
 };
 
 const COLORBAR_WIDTH_PROB = 74;
-const COLORBAR_WIDTH_RES = 240;
+const COLORBAR_WIDTH_RES = 160;
 const COLORBAR_GAP = 38;
 const COLORBAR_FONT = "28px sans-serif";
 
