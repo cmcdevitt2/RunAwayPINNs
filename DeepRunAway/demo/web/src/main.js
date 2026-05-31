@@ -543,7 +543,7 @@ async function runInference() {
 
     drawHeatmap("resCanvas", rAbs, NX, NY, {
       min: 0.0,
-      max: vmax,
+      // max: vmax,
       cmap: infernoColormap,
       title: "PDE residual magnitude",
       colorbarMaxText: vmax.toExponential(1),
