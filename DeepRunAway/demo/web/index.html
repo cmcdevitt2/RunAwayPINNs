@@ -87,7 +87,8 @@
         margin: 2rem 0 2.4rem;
       }
 
-      .info-card {
+      .info-card,
+      .figure-card {
         padding: 1.25rem 1.35rem;
         border: 1px solid rgba(148, 163, 184, 0.24);
         border-radius: 1rem;
@@ -95,13 +96,15 @@
         box-shadow: 0 24px 70px rgba(0, 0, 0, 0.25);
       }
 
-      .info-card h2 {
+      .info-card h2,
+      .figure-card h2 {
         margin: 0 0 0.7rem;
         color: #f8fafc;
         font-size: 1.3rem;
       }
 
-      .info-card p {
+      .info-card p,
+      .figure-card p {
         margin: 0.6rem 0;
         color: #cbd5e1;
         line-height: 1.65;
@@ -125,33 +128,13 @@
         white-space: nowrap;
       }
 
-      .image-section {
-        max-width: 1350px;
-        margin: 2.2rem 0;
-        padding: 1.25rem 1.35rem;
-        border: 1px solid rgba(148, 163, 184, 0.24);
-        border-radius: 1rem;
-        background: rgba(15, 23, 42, 0.72);
-        box-shadow: 0 24px 70px rgba(0, 0, 0, 0.25);
-      }
-
-      .image-section h3 {
-        margin: 0 0 1rem;
-        color: #f8fafc;
-        font-size: 1.2rem;
-      }
-
-      .image-section p {
-        margin: 0 0 1rem;
-        color: #cbd5e1;
-        line-height: 1.65;
-      }
-
-      .image-section img {
-        width: 100%;
-        height: auto;
-        border-radius: 0.5rem;
+      .figure-card img {
         display: block;
+        width: min(100%, 1050px);
+        height: auto;
+        margin-top: 1rem;
+        border-radius: 0.75rem;
+        background: #0f172a;
       }
 
       .gui-heading {
@@ -210,7 +193,7 @@
       .plots {
         display: grid;
         grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-        column-gap: 30px;
+        column-gap: 220px;
         row-gap: 42px;
         align-items: start;
         overflow: visible;
@@ -228,11 +211,11 @@
       }
 
       .plot-card:first-child {
-        padding-right: 0;
+        padding-right: 80px;
       }
 
       .plot-card:last-child {
-        padding-left: 0;
+        padding-left: 80px;
       }
 
       .canvas-row {
@@ -331,7 +314,7 @@
           <div class="equation">
             γ = √(1 + p²), &nbsp;
             C<sub>F</sub> = γ² / p², &nbsp;
-            C<sub>B</sub> = [(Z<sub>eff</sub> + 1) / 2] γ / p,
+            C<sub>B</sub> = [(Z<sub>eff</sub> + 1) / 2] γ / p
           </div>
 
           <p>
@@ -398,14 +381,22 @@
         </article>
       </section>
 
-      <section class="image-section">
-        <h3>Training history</h3>
-        <p>
-          The plot below shows the loss history during training. The parametric
-          model learns to minimize the combined PDE residual loss, boundary loss,
-          and physics-informed regularization terms across all parameter settings.
-        </p>
-        <img src="/models/loss_history.png" alt="PINN training loss history" />
+      <section class="readme-grid" aria-label="Training diagnostics">
+        <article class="figure-card">
+          <h2>Training loss history</h2>
+          <p>
+            The loss history shows the optimization trajectory for the
+            parametric runaway-probability PINN. The training loss is recorded
+            from optimizer updates, while the test loss is evaluated on an
+            independent fixed test set.
+          </p>
+
+          <img
+            src="models/loss_history.png"
+            alt="Training and test loss history for the parametric runaway-probability PINN"
+            loading="lazy"
+          />
+        </article>
       </section>
 
       <section class="gui-section" aria-label="Interactive GUI">
@@ -413,8 +404,7 @@
           <h2>Interactive surrogate evaluation</h2>
           <p>
             Move the sliders to update the runaway probability and PDE residual
-            fields. The model evaluates instantaneously in the browser using
-            ONNX Runtime WebAssembly.
+            fields.
           </p>
         </div>
 
