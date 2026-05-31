@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>DeepRunAway Interactive Demo</title>
+    <title>DeepRunAway Interactive PINN Demo</title>
 
     <style>
       :root {
@@ -44,14 +44,14 @@
       }
 
       .page {
-        width: min(96vw, 2200px);
+        width: min(96vw, 2300px);
         margin: 0 auto;
-        padding: 2.5rem 1.25rem 4rem;
+        padding: 2.6rem 1.25rem 4rem;
       }
 
       .hero {
-        max-width: 1100px;
-        margin-bottom: 2rem;
+        max-width: 1250px;
+        margin-bottom: 1.4rem;
       }
 
       .eyebrow {
@@ -66,25 +66,25 @@
       .page-title {
         margin: 0;
         color: #f8fafc;
-        font-size: clamp(2.4rem, 5vw, 4.6rem);
+        font-size: clamp(2.35rem, 4.7vw, 4.6rem);
         line-height: 1.02;
         letter-spacing: -0.055em;
       }
 
       .subtitle {
-        margin: 1.15rem 0 0;
-        max-width: 980px;
+        margin: 1.1rem 0 0;
+        max-width: 1120px;
         color: #cbd5e1;
-        font-size: clamp(1.05rem, 1.5vw, 1.32rem);
+        font-size: clamp(1.05rem, 1.45vw, 1.32rem);
         line-height: 1.65;
       }
 
-      .content-grid {
+      .readme-grid {
         display: grid;
         grid-template-columns: minmax(0, 1fr);
-        gap: 1.2rem;
-        max-width: 1250px;
-        margin-bottom: 2.4rem;
+        gap: 1.1rem;
+        max-width: 1350px;
+        margin: 2rem 0 2.4rem;
       }
 
       .info-card {
@@ -96,31 +96,38 @@
       }
 
       .info-card h2 {
-        margin: 0 0 0.65rem;
+        margin: 0 0 0.7rem;
         color: #f8fafc;
-        font-size: 1.25rem;
+        font-size: 1.3rem;
       }
 
       .info-card p {
         margin: 0.6rem 0;
         color: #cbd5e1;
-        line-height: 1.62;
+        line-height: 1.65;
       }
 
       .info-card ul {
         margin: 0.65rem 0 0.1rem;
         padding-left: 1.25rem;
         color: #cbd5e1;
-        line-height: 1.62;
+        line-height: 1.65;
       }
 
-      .gui-section {
-        margin-top: 1.2rem;
+      .equation {
+        overflow-x: auto;
+        margin: 0.7rem 0;
+        padding: 0.85rem 1rem;
+        border-radius: 0.8rem;
+        background: rgba(2, 6, 23, 0.55);
+        color: #f8fafc;
+        line-height: 1.55;
+        white-space: nowrap;
       }
 
       .gui-heading {
-        max-width: 1100px;
-        margin-bottom: 1rem;
+        max-width: 1180px;
+        margin: 2.2rem 0 1rem;
       }
 
       .gui-heading h2 {
@@ -262,59 +269,103 @@
     <main class="page">
       <section class="hero">
         <p class="eyebrow">DeepRunAway demo</p>
-        <div class="page-title">Runaway-probability PINN surrogate</div>
+        <h1 class="page-title">Parametric runaway probability function PINN</h1>
         <p class="subtitle">
-          This browser demo evaluates a physics-informed neural-network surrogate
-          for the runaway probability function using ONNX Runtime. The model
-          predicts the scalar runaway probability over momentum/pitch-angle space
-          and evaluates the corresponding PDE residual on the same grid.
+          This demo trains and deploys a physics-informed neural network for a
+          steady runaway probability function in normalized momentum and
+          pitch-angle coordinates. The browser GUI evaluates the exported ONNX
+          surrogate directly and displays both the predicted runaway probability
+          and the corresponding PDE residual.
         </p>
       </section>
 
-      <section class="content-grid" aria-label="Demo description">
+      <section class="readme-grid" aria-label="PINN description">
         <article class="info-card">
-          <h2>What the demo shows</h2>
+          <h2>Learned quantity</h2>
           <p>
-            The learned scalar is the runaway probability
-            <code>P(p, ξ; |Eφ|, Zeff, α)</code>, where <code>p</code> is the
-            normalized relativistic momentum and <code>ξ</code> is the
-            pitch-angle cosine. The left panel shows the predicted runaway
-            probability, while the right panel shows the magnitude of the
-            strong-form PDE residual.
-          </p>
-          <p>
-            The controls below vary the electric-field magnitude
-            <code>|Eφ|</code>, effective charge <code>Zeff</code>, and
-            synchrotron-radiation parameter <code>α</code>. The plots use a
-            fixed <code>100 × 100</code> log-energy/pitch-angle grid and run
-            locally in the browser with the WASM backend.
+            The parametric model learns the runaway probability
+            <code>P = P(p, ξ; |Eφ|, Zeff, α)</code>, where <code>p</code> is
+            relativistic momentum, <code>ξ</code> is pitch-angle cosine,
+            <code>|Eφ|</code> is the normalized electric-field magnitude,
+            <code>Zeff</code> is the effective charge, and <code>α</code>
+            controls the radiation-reaction contribution.
           </p>
         </article>
 
         <article class="info-card">
-          <h2>Model and training context</h2>
+          <h2>Physical model</h2>
+          <p>
+            The PINN solves a steady Fokker–Planck-type residual for the
+            runaway probability function. With
+          </p>
+
+          <div class="equation">
+            γ = √(1 + p²), &nbsp;
+            C<sub>F</sub> = γ² / p², &nbsp;
+            C<sub>B</sub> = [(Z<sub>eff</sub> + 1) / 2] γ / p,
+          </div>
+
+          <p>
+            the residual is written as a normalized combination of electric-field
+            acceleration, collisional terms, and radiation reaction:
+          </p>
+
+          <div class="equation">
+            R = (E* + C* + R*) / (C<sub>F</sub>|Eφ|)
+          </div>
+
+          <p>
+            where the strong-form terms include momentum derivatives,
+            pitch-angle derivatives, pitch-angle diffusion, and the
+            radiation-reaction drift.
+          </p>
+        </article>
+
+        <article class="info-card">
+          <h2>Boundary conditions</h2>
           <ul>
             <li>
-              Low-energy boundary condition:
-              <code>P(p_min, ξ) = 0</code> is hard-enforced by the output
-              transform.
+              The low-energy boundary <code>P(p_min, ξ) = 0</code> is
+              hard-enforced through the neural-network output transform.
             </li>
             <li>
-              High-energy runaway boundary:
-              <code>P(p_max, ξ) = 1</code> is applied on the inflow portion of
-              the high-energy boundary where <code>U_p &gt; 0</code>.
+              The high-energy boundary target <code>P(p_max, ξ) = 1</code> is
+              imposed as a soft boundary loss only on the inflow portion of the
+              high-energy boundary.
             </li>
             <li>
-              Reduced O-X threshold gating can be used during training to avoid
-              parameter regimes where the strong-form solution becomes
-              discontinuous.
+              The high-energy inflow interval is determined by the sign of the
+              momentum-space velocity
+              <code>U_p = -ξ|Eφ| - C_F - αγp(1 - ξ²)</code>.
             </li>
             <li>
-              The exported ONNX models are used directly by this page:
-              <code>rpf_forward.onnx</code> for the probability and
-              <code>rpf_residual.onnx</code> for the residual.
+              The critical pitch angle satisfying <code>U_p = 0</code> is
+              computed analytically and used to sample the high-energy boundary.
             </li>
           </ul>
+        </article>
+
+        <article class="info-card">
+          <h2>Training and deployment</h2>
+          <p>
+            The fixed-parameter script trains a single diagnostic case, while
+            the parametric script trains the model used by this browser GUI.
+            Training writes the loss history, diagnostic plots, and exported
+            ONNX models.
+          </p>
+
+          <ul>
+            <li><code>rpf_forward.onnx</code>: evaluates the runaway probability.</li>
+            <li><code>rpf_residual.onnx</code>: evaluates the PDE residual.</li>
+            <li><code>metadata.json</code>: stores parameter ranges and model metadata.</li>
+          </ul>
+
+          <p>
+            The interactive GUI below exposes sliders for <code>|Eφ|</code>,
+            <code>Zeff</code>, and <code>α</code>. It uses a fixed
+            <code>100 × 100</code> log-energy/pitch-angle grid and runs locally
+            in the browser using ONNX Runtime WASM.
+          </p>
         </article>
       </section>
 
@@ -366,79 +417,6 @@
       </section>
     </main>
 
-    <script type="module" src="/src/main.js"></script>
-  </body>
-</html>      }
-      canvas.colorbar { width: 36px; height: 100%; }
-      .axis-note { color: #adb6c4; font-size: 13px; margin-top: 8px; }
-      #status, #stats {
-        color: #c8d3e2;
-        margin: 10px 0;
-      }
-      @media (max-width: 900px) {
-        .plots { grid-template-columns: 1fr; }
-        .controls { grid-template-columns: 140px 1fr 80px; }
-      }
-    </style>
-  </head>
-  <body>
-    <main>
-      <h1>Parametric runaway probability function PINN</h1>
-      <p class="subtitle">Interactive ONNX Runtime demo for P(E, ξ; |Eφ|, Zeff, α) and its Fokker–Planck residual.</p>
-
-      <section class="controls">
-        <label for="nx">Energy grid</label>
-        <input id="nx" type="range" min="80" max="320" step="20" value="180" />
-        <span id="nxValue">180</span>
-
-        <label for="ny">Pitch grid</label>
-        <input id="ny" type="range" min="60" max="240" step="20" value="120" />
-        <span id="nyValue">120</span>
-
-        <label for="evert">|Eφ|</label>
-        <input id="evert" type="range" min="1" max="20" step="0.5" value="10" />
-        <span id="evertValue">10.0</span>
-
-        <label for="zeff">Zeff</label>
-        <input id="zeff" type="range" min="1" max="5" step="0.1" value="1" />
-        <span id="zeffValue">1.0</span>
-
-        <label for="alpha">α</label>
-        <input id="alpha" type="range" min="0" max="0.1" step="0.002" value="0" />
-        <span id="alphaValue">0.000</span>
-
-        <label for="backendMode">backend</label>
-        <select id="backendMode">
-          <option value="webgpu-wasm">forward: WebGPU, residual: WASM</option>
-          <option value="webgpu-webgpu">forward: WebGPU, residual: WebGPU</option>
-          <option value="wasm-webgpu">forward: WASM, residual: WebGPU</option>
-          <option value="wasm-wasm" selected>forward: WASM, residual: WASM</option>
-        </select>
-        <span></span>
-      </section>
-
-      <div id="status">Loading models...</div>
-      <div id="stats"></div>
-
-      <section class="plots">
-        <div class="panel">
-          <h2>Runaway probability P</h2>
-          <div class="canvas-wrap">
-            <canvas id="probCanvas"></canvas>
-            <canvas id="probColorbar" class="colorbar"></canvas>
-          </div>
-          <div class="axis-note">x-axis: log energy from 10 keV to 5 MeV, y-axis: pitch angle ξ ∈ [-1, 1]</div>
-        </div>
-        <div class="panel">
-          <h2>PDE residual |R|</h2>
-          <div class="canvas-wrap">
-            <canvas id="resCanvas"></canvas>
-            <canvas id="resColorbar" class="colorbar"></canvas>
-          </div>
-          <div class="axis-note">Residual color scale is clipped at the 99th percentile for readability.</div>
-        </div>
-      </section>
-    </main>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>
