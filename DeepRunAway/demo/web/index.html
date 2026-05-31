@@ -125,6 +125,35 @@
         white-space: nowrap;
       }
 
+      .image-section {
+        max-width: 1350px;
+        margin: 2.2rem 0;
+        padding: 1.25rem 1.35rem;
+        border: 1px solid rgba(148, 163, 184, 0.24);
+        border-radius: 1rem;
+        background: rgba(15, 23, 42, 0.72);
+        box-shadow: 0 24px 70px rgba(0, 0, 0, 0.25);
+      }
+
+      .image-section h3 {
+        margin: 0 0 1rem;
+        color: #f8fafc;
+        font-size: 1.2rem;
+      }
+
+      .image-section p {
+        margin: 0 0 1rem;
+        color: #cbd5e1;
+        line-height: 1.65;
+      }
+
+      .image-section img {
+        width: 100%;
+        height: auto;
+        border-radius: 0.5rem;
+        display: block;
+      }
+
       .gui-heading {
         max-width: 1180px;
         margin: 2.2rem 0 1rem;
@@ -369,12 +398,23 @@
         </article>
       </section>
 
+      <section class="image-section">
+        <h3>Training history</h3>
+        <p>
+          The plot below shows the loss history during training. The parametric
+          model learns to minimize the combined PDE residual loss, boundary loss,
+          and physics-informed regularization terms across all parameter settings.
+        </p>
+        <img src="/models/loss_history.png" alt="PINN training loss history" />
+      </section>
+
       <section class="gui-section" aria-label="Interactive GUI">
         <div class="gui-heading">
           <h2>Interactive surrogate evaluation</h2>
           <p>
             Move the sliders to update the runaway probability and PDE residual
-            fields.
+            fields. The model evaluates instantaneously in the browser using
+            ONNX Runtime WebAssembly.
           </p>
         </div>
 
