@@ -31,13 +31,13 @@ const FIG_HEIGHT = 1120;
 
 const PLOT_MARGIN = {
   left: 220,
-  right: 300,
+  right: 400,
   top: 132,
   bottom: 195,
 };
 
 const COLORBAR_WIDTH_PROB = 74;
-const COLORBAR_WIDTH_RES = 160;
+const COLORBAR_WIDTH_RES = 200;
 const COLORBAR_GAP = 38;
 const COLORBAR_FONT = "28px sans-serif";
 
