@@ -77,14 +77,6 @@ function superscriptInt(n) {
     .join("");
 }
 
-function hidePageHeaderText() {
-  const h1 = document.querySelector("h1");
-  const subtitle = document.querySelector("h1 + p");
-
-  if (h1) h1.style.display = "none";
-  if (subtitle) subtitle.style.display = "none";
-}
-
 function ensureInteractiveSliders() {
   hideSingleControlOnly("nx");
   hideSingleControlOnly("ny");
@@ -112,8 +104,6 @@ function ensureInteractiveSliders() {
   if (maybe$("dynamicControls")) return;
 
   const root = document.querySelector("#app") || document.body;
-  const subtitle = document.querySelector("h1 + p");
-  const h1 = document.querySelector("h1");
 
   const panel = document.createElement("section");
   panel.id = "dynamicControls";
@@ -126,7 +116,7 @@ function ensureInteractiveSliders() {
 
   panel.innerHTML = `
     <div style="display:grid; grid-template-columns: 140px 1fr 90px; gap: 14px; align-items:center; margin-bottom: 14px;">
-      <label for="evert" style="font-weight:700;">|EΦ|</label>
+      <label for="evert" style="font-weight:700;">|Eφ|</label>
       <input id="evert" type="range" min="1" max="10" step="0.01" value="10">
       <span id="evertValue">10.00</span>
 
@@ -140,13 +130,7 @@ function ensureInteractiveSliders() {
     </div>
   `;
 
-  if (subtitle && subtitle.parentNode) {
-    subtitle.parentNode.insertBefore(panel, subtitle.nextSibling);
-  } else if (h1 && h1.parentNode) {
-    h1.parentNode.insertBefore(panel, h1.nextSibling);
-  } else {
-    root.prepend(panel);
-  }
+  root.prepend(panel);
 }
 
 function forceVisible(el) {
@@ -254,7 +238,7 @@ function cleanPlotCards() {
       const parent = probCard.parentElement;
       parent.style.display = "grid";
       parent.style.gridTemplateColumns = "minmax(0, 1fr) minmax(0, 1fr)";
-      parent.style.columnGap = "30px";
+      parent.style.columnGap = "220px";
       parent.style.rowGap = "42px";
       parent.style.alignItems = "start";
       parent.style.overflow = "visible";
@@ -263,14 +247,14 @@ function cleanPlotCards() {
 
     if (probCard) {
       probCard.style.marginRight = "0";
-      probCard.style.paddingRight = "0";
+      probCard.style.paddingRight = "80px";
       probCard.style.overflow = "visible";
       probCard.style.maxWidth = "none";
     }
 
     if (resCard) {
       resCard.style.marginLeft = "0";
-      resCard.style.paddingLeft = "0";
+      resCard.style.paddingLeft = "80px";
       resCard.style.overflow = "visible";
       resCard.style.maxWidth = "none";
     }
@@ -290,12 +274,7 @@ function syncColorbarHeight(plotCanvasId, colorbarCanvasId) {
   if (!Number.isFinite(plotRect.height) || plotRect.height <= 0) return;
 
   const yAxisTop = plotRect.height * (PLOT_MARGIN.top / FIG_HEIGHT);
-  const yAxisHeight =
-    plotRect.height *
-    ((FIG_HEIGHT - PLOT_MARGIN.top - PLOT_MARGIN.bottom) / FIG_HEIGHT);
 
-  colorbarCanvas.style.height = `${yAxisHeight}px`;
-  colorbarCanvas.style.width = "90px";
   colorbarCanvas.style.marginTop = `${yAxisTop}px`;
   colorbarCanvas.style.marginBottom = "0";
   colorbarCanvas.style.alignSelf = "flex-start";
@@ -728,24 +707,24 @@ function drawColorbar(canvasId, min, max, cmap, options = {}) {
   const canvas = $(canvasId);
   const ctx = canvas.getContext("2d");
 
-  const w = 140;
+  const w = 90;
   const h = FIG_HEIGHT - PLOT_MARGIN.top - PLOT_MARGIN.bottom;
+  const dpr = window.devicePixelRatio || 1.0;
 
-  canvas.width = w;
-  canvas.height = h;
+  canvas.width = Math.round(w * dpr);
+  canvas.height = Math.round(h * dpr);
 
-  canvas.style.width = "90px";
-  canvas.style.height = "auto";
+  canvas.style.width = `${w}px`;
+  canvas.style.height = `${h}px`;
 
-  const image = ctx.createImageData(w, h);
+  const image = ctx.createImageData(canvas.width, canvas.height);
 
-  for (let j = 0; j < h; j++) {
-    const v = 1.0 - j / (h - 1);
+  for (let j = 0; j < image.height; j++) {
+    const v = 1.0 - j / Math.max(image.height - 1, 1);
     const [r, g, b] = cmap(v);
 
-    for (let i = 0; i < w; i++) {
-      const k = 4 * (j * w + i);
-
+    for (let i = 0; i < image.width; i++) {
+      const k = 4 * (j * image.width + i);
       image.data[k + 0] = r;
       image.data[k + 1] = g;
       image.data[k + 2] = b;
@@ -753,7 +732,12 @@ function drawColorbar(canvasId, min, max, cmap, options = {}) {
     }
   }
 
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.putImageData(image, 0, 0);
+  ctx.restore();
+
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
   const showMax = options.showMax ?? true;
   const maxText = options.maxText ?? max.toExponential(1);
@@ -761,13 +745,13 @@ function drawColorbar(canvasId, min, max, cmap, options = {}) {
 
   if (showMax) {
     ctx.fillStyle = topTextColor;
-    ctx.font = "38px sans-serif";
-    ctx.fillText(maxText, 10, 46);
+    ctx.font = "22px sans-serif";
+    ctx.fillText(maxText, 8, 28);
   }
 
   ctx.fillStyle = "white";
-  ctx.font = "38px sans-serif";
-  ctx.fillText(min.toFixed(0), 10, h - 24);
+  ctx.font = "22px sans-serif";
+  ctx.fillText(min.toFixed(0), 8, h - 12);
 }
 
 function scheduleInference() {
@@ -863,7 +847,6 @@ function clamp255(x) {
 }
 
 async function main() {
-  hidePageHeaderText();
   ensureInteractiveSliders();
   cleanPlotCards();
 
