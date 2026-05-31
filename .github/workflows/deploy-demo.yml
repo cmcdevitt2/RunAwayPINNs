@@ -45,6 +45,14 @@ jobs:
           cp DeepRunAway/demo/models/*.onnx DeepRunAway/demo/web/public/models/
           cp DeepRunAway/demo/models/metadata.json DeepRunAway/demo/web/public/models/
 
+      - name: Copy demo model artifacts
+        run: |
+          mkdir -p public/models
+          cp -f ../models/rpf_forward.onnx public/models/
+          cp -f ../models/rpf_residual.onnx public/models/
+          cp -f ../models/metadata.json public/models/
+          cp -f ../models/loss_history.png public/models/
+        
       - name: Build web demo
         working-directory: DeepRunAway/demo/web
         run: npm run build
