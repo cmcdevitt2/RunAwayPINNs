@@ -126,15 +126,15 @@ function ensureInteractiveSliders() {
   panel.innerHTML = `
     <div style="display:grid; grid-template-columns: 140px 1fr 90px; gap: 14px; align-items:center; margin-bottom: 14px;">
       <label for="evert" style="font-weight:700;">E_||</label>
-      <input id="evert" type="range" min="1" max="10" step="0.01" value="10">
+      <input id="evert" type="range" min="1" max="10" step="0.01" value="3">
       <span id="evertValue">3.00</span>
 
       <label for="zeff" style="font-weight:700;">Z_eff</label>
-      <input id="zeff" type="range" min="1" max="10" step="0.01" value="1">
+      <input id="zeff" type="range" min="1" max="10" step="0.01" value="3">
       <span id="zeffValue">3.00</span>
 
       <label for="alpha" style="font-weight:700;">α</label>
-      <input id="alpha" type="range" min="0" max="0.2" step="0.001" value="0">
+      <input id="alpha" type="range" min="0" max="0.2" step="0.001" value="0.06">
       <span id="alphaValue">0.060</span>
     </div>
   `;
