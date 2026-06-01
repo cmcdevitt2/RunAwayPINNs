@@ -280,115 +280,293 @@
   <body>
     <main class="page">
       <section class="hero">
-        <p class="eyebrow">DeepRunAway demo</p>
-        <h1 class="page-title">Parametric runaway probability function PINN</h1>
+        <h1 class="page-title">Runaway Probability Function (RPF) PINN</h1>
+        <p class="eyebrow">(paper) https://doi.org/10.1017/S0022377824000679 </p>
         <p class="subtitle">
-          This demo trains and deploys a physics-informed neural network for a
-          steady runaway probability function in normalized momentum and
-          pitch-angle coordinates. The browser GUI evaluates the exported ONNX
-          surrogate directly and displays both the predicted runaway probability
-          and the corresponding PDE residual.
+          This demo trains and deploys a data-free physics-informed neural network to 
+          learn a parametric solution for the adjoint to the relativistic Fokker-Planck
+          equation. The solution to the PDE represents a runaway probability function (RPF)
+          as a function of relevant plasma parameters.
         </p>
       </section>
 
       <section class="readme-grid" aria-label="PINN description">
         <article class="info-card">
-          <h2>Learned quantity</h2>
-          <p>
-            The parametric model learns the runaway probability
-            <code>P = P(p, ξ; |Eφ|, Zeff, α)</code>, where <code>p</code> is
-            relativistic momentum, <code>ξ</code> is pitch-angle cosine,
-            <code>|Eφ|</code> is the normalized electric-field magnitude,
-            <code>Zeff</code> is the effective charge, and <code>α</code>
-            controls the radiation-reaction contribution.
-          </p>
-        </article>
-
-        <article class="info-card">
           <h2>Physical model</h2>
           <p>
-            The PINN solves a steady Fokker–Planck-type residual for the
-            runaway probability function. With
-          </p>
-
-          <div class="equation">
-            γ = √(1 + p²), &nbsp;
-            C<sub>F</sub> = γ² / p², &nbsp;
-            C<sub>B</sub> = [(Z<sub>eff</sub> + 1) / 2] γ / p
-          </div>
-
-          <p>
-            the residual is written as a normalized combination of electric-field
-            acceleration, collisional terms, and radiation reaction:
-          </p>
-
-          <div class="equation">
-            R = (E* + C* + R*) / (C<sub>F</sub>|Eφ|)
-          </div>
-
-          <p>
-            where the strong-form terms include momentum derivatives,
-            pitch-angle derivatives, pitch-angle diffusion, and the
-            radiation-reaction drift.
+            The PDE of interest is the adjoint to the steady-state relativistic Fokker-Planck equation
+            <div class="equation">
+              \[
+              \left[
+                -\textcolor{red}{E_\Vert}\xi - 
+                \frac{1+p^2}{p^2} 
+                - \textcolor{cyan}{\alpha} p \sqrt{1+p^2} 
+              \right]
+              \frac{\partial P}{\partial p}
+              +
+              \left(1-\xi^2\right)
+              \left[
+                -\frac{\textcolor{red}{E_\Vert} }{p}
+                +
+                \textcolor{cyan}{\alpha} \frac{\xi}{\sqrt{1+p^2}}
+              \right]
+              \frac{\partial P}{\partial \xi}
+              =
+              -\frac{\sqrt{1+p^2}}{p^3}\frac{\textcolor{lime}{Z_{eff}} +1}{2}
+              \frac{\partial}{\partial \xi}
+              \left[
+                \left(1-\xi^2\right)
+                \frac{\partial P}{\partial \xi}
+              \right],
+              \]
+            </div>
+            where \((\textcolor{red}{E_\parallel},\textcolor{cyan}{Z_{eff}},\textcolor{lime}{\alpha})\)
+            are the parameters to the PDE, \((p,\xi)\) are the independent variables,
+            being the relativistic momentum and pitch-angle, respecitively, and \((P)\) is the 
+            so-called runaway probability function (RPF). Boundary conditions are given by
+            <div class="equation">
+              \[
+                P = \begin{cases}
+                      0, &p=p_{min} \\
+                      1, &p=p_{max} \textrm{ and } (-E_\Vert\xi - \frac{1+p^2}{p^2} - \alpha p\sqrt{1+p^2}) > 0 \\
+                      \textrm{unconstrained}, & p=p_{max} \textrm{ and } (-E_\Vert\xi - \frac{1+p^2}{p^2} - \alpha p\sqrt{1+p^2}) \leq 0
+                    \end{cases}
+                    \quad .
+              \]
+            </div>
+            The goal of the PINN is to thus learn the parametric solution \(P(p,\xi;E_\Vert,Z_{eff},\alpha)\).
           </p>
         </article>
 
         <article class="info-card">
-          <h2>Boundary conditions</h2>
-          <ul>
-            <li>
-              The low-energy boundary <code>P(p_min, ξ) = 0</code> is
-              hard-enforced through the neural-network output transform.
-            </li>
-            <li>
-              The high-energy boundary target <code>P(p_max, ξ) = 1</code> is
-              imposed as a soft boundary loss only on the inflow portion of the
-              high-energy boundary.
-            </li>
-            <li>
-              The high-energy inflow interval is determined by the sign of the
-              momentum-space velocity
-              <code>U_p = -ξ|Eφ| - C_F - αγp(1 - ξ²)</code>.
-            </li>
-            <li>
-              The critical pitch angle satisfying <code>U_p = 0</code> is
-              computed analytically and used to sample the high-energy boundary.
-            </li>
-          </ul>
+          <h2>Data-free PINN construction</h2>
+          <p>
+            The central objective of the PINN will be to learn a solution to the PDE that satisfies
+            the loss function containing the PDE and the boundary conditions. Instead of an imposing additional
+            constraint for the PINN's solution to be bounded between 0 and 1, the following transform is applied
+            <div class="equation">
+              \[
+              P = \tanh(\bar{p}^2P_{NN}^2),
+              \]
+            </div>
+            where \(\bar{p} \equiv (p-p_{min})/(p_{max}-p_{min}) \in [0,1]\), and \(P_{NN}\) 
+            is the raw output of the neural network. In addition to the benefit of \(P\) being 
+            constrianed to a probability value, the low momentum boundary condition is 
+            also inherently satisfied. As a result, the loss function that the PINN will seek
+            to minimize will be the PDE and the high momentum boundary condition, written as
+            <div class="equation">
+              \[
+              \textrm{Loss} \equiv 
+                \frac{1}{N_\textrm{PDE}} \sum_{i=0}^{N_\textrm{PDE}} \mathcal{R}_i^2 
+                + \frac{1}{N_\textrm{BC}}\sum_{i=0}^{N_\textrm{BC}} \mathcal{B}_i^2 \quad ,
+              \]
+            </div>
+            where \(\mathcal{R,B}\) are the residual errors of the PDE and high momentum boundary condition, 
+            respectively. A schematic of the PINN is shown below.
+          </p>
+          <svg
+            class="pinn-schematic"
+            viewBox="0 0 1250 520"
+            role="img"
+          >
+            <defs>
+              <marker
+                id="pinn-arrow"
+                markerWidth="12"
+                markerHeight="12"
+                refX="10"
+                refY="6"
+                orient="auto"
+                markerUnits="strokeWidth"
+              >
+                <path d="M2,2 L10,6 L2,10 Z" fill="#ffffff"></path>
+              </marker>
+
+              <linearGradient id="pinn-box-gradient" x1="0" x2="1">
+                <stop offset="0%" stop-color="#ffffff" stop-opacity="0.95"></stop>
+                <stop offset="100%" stop-color="#ffffff" stop-opacity="0.55"></stop>
+              </linearGradient>
+            </defs>
+
+            <rect x="0" y="0" width="1250" height="520" rx="26" fill="#0f172a"></rect>
+
+            <style>
+              .pinn-schematic {
+                display: block;
+                width: min(100%, 1250px);
+                height: auto;
+                margin: 1rem 0;
+                border-radius: 1rem;
+                background: #0f172a;
+              }
+
+              .pinn-box {
+                fill: #111827;
+                stroke: rgba(255, 255, 255, 0.62);
+                stroke-width: 2.6;
+              }
+
+              .pinn-box-highlight {
+                fill: #111827;
+                stroke: url(#pinn-box-gradient);
+                stroke-width: 3.4;
+              }
+
+              .pinn-title {
+                fill: #ffffff;
+                font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                font-size: 24px;
+                font-weight: 800;
+              }
+
+              .pinn-text {
+                fill: #f8fafc;
+                font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                font-size: 21px;
+                font-weight: 650;
+              }
+
+              .pinn-small {
+                fill: #e5e7eb;
+                font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                font-size: 16px;
+                font-weight: 520;
+              }
+
+              .pinn-arrow {
+                stroke: #ffffff;
+                stroke-width: 3.4;
+                fill: none;
+                marker-end: url(#pinn-arrow);
+              }
+
+              .pinn-link {
+                stroke: rgba(255, 255, 255, 0.55);
+                stroke-width: 1.8;
+              }
+
+              .pinn-node {
+                fill: #ffffff;
+              }
+            </style>
+
+            <!-- Inputs -->
+            <rect class="pinn-box" x="45" y="145" width="215" height="125" rx="18"></rect>
+            <text class="pinn-title" x="152.5" y="188" text-anchor="middle">Inputs</text>
+            <text class="pinn-text" x="152.5" y="238" text-anchor="middle">p, ξ, E<tspan baseline-shift="sub" font-size="70%">||</tspan>, Z<tspan baseline-shift="sub" font-size="70%">eff</tspan>, α</text>
+
+            <!-- Neural network -->
+            <rect class="pinn-box-highlight" x="340" y="100" width="260" height="270" rx="24"></rect>
+            <text class="pinn-title" x="470" y="140" text-anchor="middle">Neural network</text>
+
+            <!-- Network links: fully connected layer 1 to layer 2 -->
+            <g class="pinn-link">
+              <line x1="402" y1="225" x2="458" y2="205"></line>
+              <line x1="402" y1="225" x2="458" y2="250"></line>
+              <line x1="402" y1="225" x2="458" y2="295"></line>
+              <line x1="402" y1="225" x2="458" y2="340"></line>
+
+              <line x1="402" y1="270" x2="458" y2="205"></line>
+              <line x1="402" y1="270" x2="458" y2="250"></line>
+              <line x1="402" y1="270" x2="458" y2="295"></line>
+              <line x1="402" y1="270" x2="458" y2="340"></line>
+
+              <line x1="402" y1="315" x2="458" y2="205"></line>
+              <line x1="402" y1="315" x2="458" y2="250"></line>
+              <line x1="402" y1="315" x2="458" y2="295"></line>
+              <line x1="402" y1="315" x2="458" y2="340"></line>
+
+              <!-- Network links: fully connected layer 2 to layer 3 -->
+              <line x1="482" y1="205" x2="538" y2="235"></line>
+              <line x1="482" y1="205" x2="538" y2="280"></line>
+              <line x1="482" y1="205" x2="538" y2="325"></line>
+
+              <line x1="482" y1="250" x2="538" y2="235"></line>
+              <line x1="482" y1="250" x2="538" y2="280"></line>
+              <line x1="482" y1="250" x2="538" y2="325"></line>
+
+              <line x1="482" y1="295" x2="538" y2="235"></line>
+              <line x1="482" y1="295" x2="538" y2="280"></line>
+              <line x1="482" y1="295" x2="538" y2="325"></line>
+
+              <line x1="482" y1="340" x2="538" y2="235"></line>
+              <line x1="482" y1="340" x2="538" y2="280"></line>
+              <line x1="482" y1="340" x2="538" y2="325"></line>
+            </g>
+
+            <!-- Network nodes -->
+            <g class="pinn-node">
+              <circle cx="390" cy="225" r="12"></circle>
+              <circle cx="390" cy="270" r="12"></circle>
+              <circle cx="390" cy="315" r="12"></circle>
+
+              <circle cx="470" cy="205" r="12"></circle>
+              <circle cx="470" cy="250" r="12"></circle>
+              <circle cx="470" cy="295" r="12"></circle>
+              <circle cx="470" cy="340" r="12"></circle>
+
+              <circle cx="550" cy="235" r="12"></circle>
+              <circle cx="550" cy="280" r="12"></circle>
+              <circle cx="550" cy="325" r="12"></circle>
+            </g>
+
+            <!-- Output -->
+            <rect class="pinn-box" x="680" y="145" width="225" height="125" rx="18"></rect>
+            <text class="pinn-title" x="792.5" y="183" text-anchor="middle">Output</text>
+            <text class="pinn-text" x="792.5" y="226" text-anchor="middle">
+              P(p, ξ; E<tspan baseline-shift="sub" font-size="70%">||</tspan>, Z<tspan baseline-shift="sub" font-size="70%">eff</tspan>, α)
+            </text>
+
+            <!-- Derivatives -->
+            <rect class="pinn-box" x="980" y="70" width="225" height="155" rx="18"></rect>
+            <text class="pinn-title" x="1092.5" y="108" text-anchor="middle">Autodiff</text>
+            <text class="pinn-text" x="1092.5" y="150" text-anchor="middle">∂P/∂p, ∂P/∂ξ</text>
+            <text class="pinn-text" x="1092.5" y="187" text-anchor="middle">∂²P/∂ξ²</text>
+
+            <!-- Loss -->
+            <rect class="pinn-box" x="980" y="295" width="225" height="85" rx="18"></rect>
+            <text class="pinn-text" x="1092.5" y="346" text-anchor="middle">
+              Loss = L<tspan baseline-shift="sub" font-size="70%">PDE</tspan>
+              +
+              L<tspan baseline-shift="sub" font-size="70%">BC</tspan>
+            </text>
+            
+            <!-- Optimizer -->
+            <rect class="pinn-box-highlight" x="407" y="420" width="410" height="68" rx="18"></rect>
+            <text class="pinn-title" x="612" y="462" text-anchor="middle">Optimizer update </text>
+
+            <!-- Arrows -->
+            <path class="pinn-arrow" d="M260 237.5 H333"></path>
+            <path class="pinn-arrow" d="M600 237.5 H673"></path>
+            <path class="pinn-arrow" d="M905 215 C940 178, 950 180, 974 150"></path>
+            <path class="pinn-arrow" d="M1092.5 225 V288"></path>
+            <path class="pinn-arrow" d="M980 383 C900 424, 845 452, 824 454"></path>
+            <path class="pinn-arrow" d="M407 454 C306 440, 296 360, 340 320"></path>
+          </svg>
+          <p>
+            Regarding the optimization procress, this will be done by deploying two algorithms. 
+            The first will be ADAM for the first handful of iterations, as ADAM is effective at 
+            approaching the general area in which the global minimum lies. After the PINN has 
+            sufficiently trained with ADAM, a second order quasi-Newton algorithm will be used (SSBroyden),
+            which is significantly more effective at overcoming local minima and reaching levels of 
+            loss equivalent to numerical precision.
+          </p>            
         </article>
 
-        <article class="info-card">
-          <h2>Training and deployment</h2>
-          <p>
-            The fixed-parameter script trains a single diagnostic case, while
-            the parametric script trains the model used by this browser GUI.
-            Training writes the loss history, diagnostic plots, and exported
-            ONNX models.
-          </p>
-
-          <ul>
-            <li><code>rpf_forward.onnx</code>: evaluates the runaway probability.</li>
-            <li><code>rpf_residual.onnx</code>: evaluates the PDE residual.</li>
-            <li><code>metadata.json</code>: stores parameter ranges and model metadata.</li>
-          </ul>
-
-          <p>
-            The interactive GUI below exposes sliders for <code>|Eφ|</code>,
-            <code>Zeff</code>, and <code>α</code>. It uses a fixed
-            <code>100 × 100</code> log-energy/pitch-angle grid and runs locally
-            in the browser using ONNX Runtime WASM.
-          </p>
-        </article>
-      </section>
-
+   
       <section class="readme-grid" aria-label="Training diagnostics">
         <article class="figure-card">
-          <h2>Training loss history</h2>
+          <h2>PINN training configuration</h2>
           <p>
-            The loss history shows the optimization trajectory for the
-            parametric runaway-probability PINN. The training loss is recorded
-            from optimizer updates, while the test loss is evaluated on an
-            independent fixed test set.
+            The PINN will train over the following range of parameters: 
+            \(p \in [0.17, 10.8], \xi \in [-1,1], E_\Vert \in [1,10], Z_{eff} \in [1,10], \alpha \in [0,0.2]\).
+            The neural network is chosen to have a width of 48 neurons and a depth of 6 layers, and the tanh
+            activation function is used. 
+            For the collocation points, roughly 1 million points are used in the interior of the domain, 
+            and a quarter million points are additionally sampled at the boundary condition. The PINN 
+            will train with ADAM for 5,000 iterations and SSBroyden for 50,000 iterations. Lastly, the PINN
+            will train on an NVIDIA B200 GPU and implemented in the JAX library in Python. 
+            The training history is show below.
           </p>
 
           <img
@@ -401,21 +579,21 @@
 
       <section class="gui-section" aria-label="Interactive GUI">
         <div class="gui-heading">
-          <h2>Interactive surrogate evaluation</h2>
-          <p>
-            Move the sliders to update the runaway probability and PDE residual
-            fields.
-          </p>
+          <h2>Parametric PINN solution</h2>
         </div>
-
         <div id="app">
           <section class="controls" aria-label="Model parameters">
+            <p>
+              The sliders below can be adjusted to 
+              view the impact of the plasma parameters on the
+              PINN solution, and the correspinding residual is also shown.
+             </p> d
             <div class="control-grid">
-              <label for="evert">|Eφ|</label>
+              <label for="evert"> E_|| </tspan> </label>
               <input id="evert" type="range" min="1" max="10" step="0.01" value="3" />
               <span id="evertValue">3.00</span>
 
-              <label for="zeff">Zeff</label>
+              <label for="zeff">Z_eff</label>
               <input id="zeff" type="range" min="1" max="10" step="0.01" value="3" />
               <span id="zeffValue">3.00</span>
 
@@ -446,7 +624,29 @@
         </div>
       </section>
     </main>
+    <script>
 
+      window.MathJax = {
+
+        tex: {
+
+          inlineMath: [["\\(", "\\)"]],
+
+          displayMath: [["\\[", "\\]"]]
+
+        },
+
+        svg: {
+
+          fontCache: "global"
+
+        }
+
+      };
+
+    </script>
+
+    <script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>
