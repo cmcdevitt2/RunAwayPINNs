@@ -31,13 +31,13 @@ const FIG_HEIGHT = 1120;
 
 const PLOT_MARGIN = {
   left: 220,
-  right: 400,
+  right: 300,
   top: 132,
   bottom: 195,
 };
 
 const COLORBAR_WIDTH_PROB = 74;
-const COLORBAR_WIDTH_RES = 200;
+const COLORBAR_WIDTH_RES = 160;
 const COLORBAR_GAP = 38;
 const COLORBAR_FONT = "28px sans-serif";
 
@@ -543,7 +543,7 @@ async function runInference() {
 
     drawHeatmap("resCanvas", rAbs, NX, NY, {
       min: 0.0,
-      // max: vmax,
+      max: vmax,
       cmap: infernoColormap,
       title: "PDE residual magnitude",
       colorbarMaxText: vmax.toExponential(1),
