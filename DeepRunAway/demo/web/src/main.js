@@ -5,8 +5,8 @@ let residualSession = null;
 let running = false;
 let pending = false;
 
-const NX = 128;
-const NY = 128;
+const NX = 64;
+const NY = 64;
 
 let ENERGY_MIN = 1.0e4;
 let ENERGY_MAX = 5.0e6;
