@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DeepRunAway Interactive PINN Demo</title>
+
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+        background: #0b1020;
+        color: #e5e7eb;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-width: 320px;
+        background:
+          radial-gradient(circle at top left, rgba(59, 130, 246, 0.18), transparent 34rem),
+          radial-gradient(circle at top right, rgba(14, 165, 233, 0.12), transparent 32rem),
+          #0b1020;
+      }
+
+      a {
+        color: #93c5fd;
+      }
+
+      a:hover {
+        color: #bfdbfe;
+      }
+
+      code {
+        padding: 0.12rem 0.32rem;
+        border-radius: 0.35rem;
+        background: rgba(148, 163, 184, 0.16);
+        color: #f8fafc;
+      }
+
+      .page {
+        width: min(96vw, 2300px);
+        margin: 0 auto;
+        padding: 2.6rem 1.25rem 4rem;
+      }
+
+      .hero {
+        max-width: 1250px;
+        margin-bottom: 1.4rem;
+      }
+
+      .eyebrow {
+        margin: 0 0 0.7rem;
+        color: #38bdf8;
+        font-size: 0.95rem;
+        font-weight: 700;
+        letter-spacing: 0.11em;
+        text-transform: uppercase;
+      }
+
+      .page-title {
+        margin: 0;
+        color: #f8fafc;
+        font-size: clamp(2.35rem, 4.7vw, 4.6rem);
+        line-height: 1.02;
+        letter-spacing: -0.055em;
+      }
+
+      .subtitle {
+        margin: 1.1rem 0 0;
+        max-width: 1120px;
+        color: #cbd5e1;
+        font-size: clamp(1.05rem, 1.45vw, 1.32rem);
+        line-height: 1.65;
+      }
+
+      .readme-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 1.1rem;
+        max-width: 1350px;
+        margin: 2rem 0 2.4rem;
+      }
+
+      .info-card,
+      .figure-card {
+        padding: 1.25rem 1.35rem;
+        border: 1px solid rgba(148, 163, 184, 0.24);
+        border-radius: 1rem;
+        background: rgba(15, 23, 42, 0.72);
+        box-shadow: 0 24px 70px rgba(0, 0, 0, 0.25);
+      }
+
+      .info-card h2,
+      .figure-card h2 {
+        margin: 0 0 0.7rem;
+        color: #f8fafc;
+        font-size: 1.3rem;
+      }
+
+      .info-card p,
+      .figure-card p {
+        margin: 0.6rem 0;
+        color: #cbd5e1;
+        line-height: 1.65;
+      }
+
+      .info-card ul {
+        margin: 0.65rem 0 0.1rem;
+        padding-left: 1.25rem;
+        color: #cbd5e1;
+        line-height: 1.65;
+      }
+
+      .equation {
+        overflow-x: auto;
+        margin: 0.7rem 0;
+        padding: 0.85rem 1rem;
+        border-radius: 0.8rem;
+        background: rgba(2, 6, 23, 0.55);
+        color: #f8fafc;
+        line-height: 1.55;
+        white-space: nowrap;
+      }
+
+      .figure-card img {
+        display: block;
+        width: min(100%, 1050px);
+        height: auto;
+        margin-top: 1rem;
+        border-radius: 0.75rem;
+        background: #0f172a;
+      }
+
+      .gui-heading {
+        max-width: 1180px;
+        margin: 2.2rem 0 1rem;
+      }
+
+      .gui-heading h2 {
+        margin: 0 0 0.45rem;
+        color: #f8fafc;
+        font-size: clamp(1.8rem, 2.6vw, 2.8rem);
+        letter-spacing: -0.035em;
+      }
+
+      .gui-heading p {
+        margin: 0;
+        color: #cbd5e1;
+        font-size: 1.05rem;
+        line-height: 1.55;
+      }
+
+      #app {
+        width: 100%;
+      }
+
+      .controls {
+        width: min(100%, 1500px);
+        margin: 18px 0 28px 0;
+        padding: 18px 20px;
+        border: 1px solid #334155;
+        border-radius: 12px;
+        background: #151b24;
+      }
+
+      .control-grid {
+        display: grid;
+        grid-template-columns: 140px minmax(220px, 1fr) 100px;
+        gap: 14px;
+        align-items: center;
+      }
+
+      .control-grid label {
+        font-weight: 700;
+        color: #f8fafc;
+      }
+
+      .control-grid span {
+        color: #e5e7eb;
+        font-variant-numeric: tabular-nums;
+      }
+
+      input[type="range"] {
+        width: 100%;
+      }
+
+      .plots {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        column-gap: 220px;
+        row-gap: 42px;
+        align-items: start;
+        overflow: visible;
+        max-width: none;
+      }
+
+      .plot-card {
+        background: transparent;
+        border: none;
+        box-shadow: none;
+        padding: 0;
+        margin: 0;
+        overflow: visible;
+        max-width: none;
+      }
+
+      .plot-card:first-child {
+        padding-right: 80px;
+      }
+
+      .plot-card:last-child {
+        padding-left: 80px;
+      }
+
+      .canvas-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 18px;
+        overflow: visible;
+      }
+
+      .canvas-row canvas:first-child {
+        width: 100%;
+        height: auto;
+        min-width: 0;
+      }
+
+      .colorbar {
+        width: 90px;
+        height: auto;
+        flex: 0 0 auto;
+      }
+
+      #status,
+      #stats {
+        display: none;
+      }
+
+      @media (max-width: 1350px) {
+        .plots {
+          grid-template-columns: minmax(0, 1fr);
+          column-gap: 0;
+        }
+
+        .plot-card:first-child,
+        .plot-card:last-child {
+          padding-left: 0;
+          padding-right: 0;
+        }
+      }
+
+      @media (max-width: 760px) {
+        .page {
+          width: 100%;
+          padding: 1.5rem 0.8rem 2.5rem;
+        }
+
+        .control-grid {
+          grid-template-columns: 1fr;
+          gap: 8px;
+        }
+
+        .canvas-row {
+          gap: 10px;
+        }
+
+        .colorbar {
+          width: 54px !important;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <main class="page">
+      <section class="hero">
+        <p class="eyebrow">DeepRunAway demo</p>
+        <h1 class="page-title">Parametric runaway probability function PINN</h1>
+        <p class="subtitle">
+          This demo trains and deploys a physics-informed neural network for a
+          steady runaway probability function in normalized momentum and
+          pitch-angle coordinates. The browser GUI evaluates the exported ONNX
+          surrogate directly and displays both the predicted runaway probability
+          and the corresponding PDE residual.
+        </p>
+      </section>
+
+      <section class="readme-grid" aria-label="PINN description">
+        <article class="info-card">
+          <h2>Learned quantity</h2>
+          <p>
+            The parametric model learns the runaway probability
+            <code>P = P(p, ξ; |Eφ|, Zeff, α)</code>, where <code>p</code> is
+            relativistic momentum, <code>ξ</code> is pitch-angle cosine,
+            <code>|Eφ|</code> is the normalized electric-field magnitude,
+            <code>Zeff</code> is the effective charge, and <code>α</code>
+            controls the radiation-reaction contribution.
+          </p>
+        </article>
+
+        <article class="info-card">
+          <h2>Physical model</h2>
+          <p>
+            The PINN solves a steady Fokker–Planck-type residual for the
+            runaway probability function. With
+          </p>
+
+          <div class="equation">
+            γ = √(1 + p²), &nbsp;
+            C<sub>F</sub> = γ² / p², &nbsp;
+            C<sub>B</sub> = [(Z<sub>eff</sub> + 1) / 2] γ / p
+          </div>
+
+          <p>
+            the residual is written as a normalized combination of electric-field
+            acceleration, collisional terms, and radiation reaction:
+          </p>
+
+          <div class="equation">
+            R = (E* + C* + R*) / (C<sub>F</sub>|Eφ|)
+          </div>
+
+          <p>
+            where the strong-form terms include momentum derivatives,
+            pitch-angle derivatives, pitch-angle diffusion, and the
+            radiation-reaction drift.
+          </p>
+        </article>
+
+        <article class="info-card">
+          <h2>Boundary conditions</h2>
+          <ul>
+            <li>
+              The low-energy boundary <code>P(p_min, ξ) = 0</code> is
+              hard-enforced through the neural-network output transform.
+            </li>
+            <li>
+              The high-energy boundary target <code>P(p_max, ξ) = 1</code> is
+              imposed as a soft boundary loss only on the inflow portion of the
+              high-energy boundary.
+            </li>
+            <li>
+              The high-energy inflow interval is determined by the sign of the
+              momentum-space velocity
+              <code>U_p = -ξ|Eφ| - C_F - αγp(1 - ξ²)</code>.
+            </li>
+            <li>
+              The critical pitch angle satisfying <code>U_p = 0</code> is
+              computed analytically and used to sample the high-energy boundary.
+            </li>
+          </ul>
+        </article>
+
+        <article class="info-card">
+          <h2>Training and deployment</h2>
+          <p>
+            The fixed-parameter script trains a single diagnostic case, while
+            the parametric script trains the model used by this browser GUI.
+            Training writes the loss history, diagnostic plots, and exported
+            ONNX models.
+          </p>
+
+          <ul>
+            <li><code>rpf_forward.onnx</code>: evaluates the runaway probability.</li>
+            <li><code>rpf_residual.onnx</code>: evaluates the PDE residual.</li>
+            <li><code>metadata.json</code>: stores parameter ranges and model metadata.</li>
+          </ul>
+
+          <p>
+            The interactive GUI below exposes sliders for <code>|Eφ|</code>,
+            <code>Zeff</code>, and <code>α</code>. It uses a fixed
+            <code>100 × 100</code> log-energy/pitch-angle grid and runs locally
+            in the browser using ONNX Runtime WASM.
+          </p>
+        </article>
+      </section>
+
+      <section class="readme-grid" aria-label="Training diagnostics">
+        <article class="figure-card">
+          <h2>Training loss history</h2>
+          <p>
+            The loss history shows the optimization trajectory for the
+            parametric runaway-probability PINN. The training loss is recorded
+            from optimizer updates, while the test loss is evaluated on an
+            independent fixed test set.
+          </p>
+
+          <img
+            src="../models/loss_history.png"
+            alt="Training and test loss history for the parametric runaway-probability PINN"
+            loading="lazy"
+          />
+        </article>
+      </section>
+
+      <section class="gui-section" aria-label="Interactive GUI">
+        <div class="gui-heading">
+          <h2>Interactive surrogate evaluation</h2>
+          <p>
+            Move the sliders to update the runaway probability and PDE residual
+            fields.
+          </p>
+        </div>
+
+        <div id="app">
+          <section class="controls" aria-label="Model parameters">
+            <div class="control-grid">
+              <label for="evert">|Eφ|</label>
+              <input id="evert" type="range" min="1" max="10" step="0.01" value="3" />
+              <span id="evertValue">3.00</span>
+
+              <label for="zeff">Zeff</label>
+              <input id="zeff" type="range" min="1" max="10" step="0.01" value="3" />
+              <span id="zeffValue">3.00</span>
+
+              <label for="alpha">α</label>
+              <input id="alpha" type="range" min="0" max="0.2" step="0.001" value="0.06" />
+              <span id="alphaValue">0.060</span>
+            </div>
+          </section>
+
+          <div id="status"></div>
+          <div id="stats"></div>
+
+          <section class="plots" aria-label="Model output plots">
+            <article class="plot-card">
+              <div class="canvas-row">
+                <canvas id="probCanvas"></canvas>
+                <canvas id="probColorbar" class="colorbar"></canvas>
+              </div>
+            </article>
+
+            <article class="plot-card">
+              <div class="canvas-row">
+                <canvas id="resCanvas"></canvas>
+                <canvas id="resColorbar" class="colorbar"></canvas>
+              </div>
+            </article>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

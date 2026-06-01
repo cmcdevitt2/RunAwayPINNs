@@ -1,0 +1,72 @@
+name: Deploy PINN demo to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "DeepRunAway/demo/**"
+      - ".github/workflows/deploy-demo.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: DeepRunAway/demo/web/package-lock.json
+
+      - name: Install web dependencies
+        working-directory: DeepRunAway/demo/web
+        run: npm ci
+
+      - name: Copy demo model artifacts
+        run: |
+          mkdir -p DeepRunAway/demo/web/public/models
+          cp -f DeepRunAway/demo/models/rpf_forward.onnx DeepRunAway/demo/web/public/models/
+          cp -f DeepRunAway/demo/models/rpf_residual.onnx DeepRunAway/demo/web/public/models/
+          cp -f DeepRunAway/demo/models/metadata.json DeepRunAway/demo/web/public/models/
+          cp -f DeepRunAway/demo/models/loss_history.png DeepRunAway/demo/web/public/models/
+          
+      - name: Build web demo
+        working-directory: DeepRunAway/demo/web
+        run: npm run build
+
+      - name: Assemble Pages artifact under /DeepRunAway/demo
+        run: |
+          mkdir -p _pages/DeepRunAway/demo
+          cp -R DeepRunAway/demo/web/dist/* _pages/DeepRunAway/demo/
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _pages
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
