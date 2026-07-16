@@ -1,0 +1,466 @@
+\documentclass[preprint,aip]{revtex4-2}
+\usepackage{cancel}
+\usepackage{times}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{float}
+\usepackage{amsmath}
+\usepackage{bm}
+\usepackage{graphicx}
+\usepackage{amssymb}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{mathrsfs}
+\hypersetup{bookmarks=true,colorlinks=true, linkcolor=blue,linktoc=all}
+\usepackage[FIGTOPCAP]{subfigure}
+\usepackage{ulem}
+
+\newcommand{\CM}[1]{{\color{red}{[CM: #1]}}}
+\newcommand{\JA}[1]{{\color{blue}{[JA: #1]}}}
+
+\makeatletter
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\renewcommand{\headrulewidth}{0pt}
+\fancyhead{}
+
+\providecommand{\tabularnewline}{\\}
+\usepackage{babel}
+\makeatother
+
+\begin{document}
+
+\title{Notes on Adjoint Fokker-Planck for Runaway Electrons}
+
+%\author{Jonathan S. Arnaud}
+%\email{jsarnaud@lanl.gov}
+%\affiliation{Nuclear Engineering Program, Department of Materials Science and Engineering, University of Florida, Gainesville, FL 32611, United States of America}
+%\author{Xian-Zhu Tang}
+%\affiliation{Theoretical Division, Los Alamos National Laboratory, Los Alamos, NM 87545, United States of America}
+%\author{Christopher J. McDevitt}
+%\email{cmcdevitt@ufl.edu}
+%\affiliation{Nuclear Engineering Program, Department of Materials Science and Engineering, University of Florida, Gainesville, FL 32611, United States of America}
+
+\date{\today}
+
+\begin{abstract}
+These notes describe the use of the adjoint to the relativistic Fokker-Planck equation in the context of describing runaway electrons.
+\end{abstract}
+
+\maketitle
+\section{Introduction}
+Electron runaway is a process where the friction experienced from Coulomb collisions is overcome by the acceleration force felt by an electric field~\cite{wilson1925acceleration}. These so-called runaway electrons (REs) are found throughout nature in thunderstorms~\cite{gurevich1992runaway}, atmospheric~\cite{fishman1994discovery,bell1995runaway} and  astrophysical~\cite{hoyle1949some} phenomena such as solar flares~\cite{holman1985acceleration} and galactic centers~\cite{lesch1992origin}, and toroidal devices such as tokamaks, stellarators, and others (see Ref.~\cite{knoepfel1979runaway} and references therein).
+
+The runaway electron population is described by the following relativistic Vlasov-Fokker-Planck-Boltzmann system
+\begin{equation*}
+\frac{\partial f_e}{\partial t} + \mathbf{v}\cdot\nabla_\mathbf{x}f_e + \mathbf{F}_\mathrm{ext}\cdot\nabla_\mathbf{p}f_e = \sum_b C^{eb}[f_e,f_b] + S_e,
+\end{equation*}
+where $f_e(\mathbf{x,p},t)$ is the electron distribution in phase space consisting of position $\mathbf{x}$, relativistic momentum $\mathbf{p}$, and time $t$, the external forces in the system is $\mathbf{F}_\mathrm{ext}$, the collision operator for each species $b$ is $C^{eb}[f_e,f_b]$, and $S_e$ represents arbitrary sources of electrons. The computational requirements to solve the system above can be prohibitive in scenarios that require rapid iteration. For example, a large desire exists to obtain an approximation of the runaway electron distribution during transient events in tokamaks known as disruptions, where the final RE distribution can be used to infer the potential damage in the machine. 
+
+Analytical solutions of the relativistic Vlasov-Fokker-Planck-Boltzmann system have been obtained in various contexts. Initial theoretical work by Dreicer~\cite{dreicer1959electron,dreicer1960electron} with a relativistic correction by Connor and Hastie~\cite{connor1975relativistic} performed asymptotic expansions across multiple regions in velocity space to obtain an estimate for the rate in which REs form, due to Coulomb collisions diffusing electrons in velocity space across the region in which they run away. As the runaway electron literature began to grow, a plethora of analytical estimates that describe distinct RE formation mechanism were derived~\cite{rosenbluth1997runaway,smith2008hot,martin2017formation,hesslow2019influence,ekmark2024fluid}. Such approximate forms can be used to evolve the bulk RE population, which can be written as
+\begin{equation*}
+\frac{Dn_\mathrm{RE}}{Dt} = S_\mathrm{RE} - L_\mathrm{RE},
+\end{equation*}
+where $D(\cdot)/Dt$ is the total derivative, and the sources and sinks of REs are $S_\mathrm{RE}$ and $L_\mathrm{RE}$, respectively.
+
+These notes aim to investigate and demonstrate the utility of the adjoint of the kinetic equation to provide a more efficient means of directly computing quantities of interest pertaining to the RE distribution. The primary application will be its use in the bulk description written above, however, other applications will also be described.
+
+\section{Adjoint Fokker-Planck in a homogeneous plasma}
+Cylindrical coordinates will be used to describe physical space $\mathbf{x} = [R,\varphi,Z]$, where $\varphi$ is the toroidal angle, and axial symmetry will be assumed $(\partial/\partial\varphi \to 0)$. We will consider a homogeneous plasma, such that the spatially dependent terms will be omitted, and use spherical momentum coordinates $\mathbf{p} = [p,\varphi,\vartheta]$, where $p$ is the normalized relativistic momentum $p = |\mathbf{p}|/(m_ec)$, and we will transform the azimuthal angle $\vartheta$ to the electron pitch-angle by the relation $\xi = \cos\vartheta = \mathbf{p\cdot B}/(pB)$, where runaway electrons will pertain to $\xi = -1$, and $B$ is the magnetic field, and the volume element is $\mathrm{d^3p} = 2\pi p^2\mathrm{d}p\mathrm{d}\xi$. As will be shown later, the Boltzmann collision operator for large angle collisions can be omitted for now, as the physical mechanism it describes can be recovered during post-processing of the adjoint solution. As a result, the Vlasov-Fokker-Planck-Boltzmann system is reduced to just Fokker-Planck, where the external forces considered are the acceleration force from the electric field, and the synchrotron radiation reaction force from a charged particle's orbit along a magnetic field (Bremsstrahlung radiation is neglected for its negligible contribution compared to synchrotron radiation), and the the system can be written as 
+\begin{equation}\label{eq:AFP1}
+\begin{aligned}
+\frac{\partial f_e}{\partial t} + 
+&\underbrace{
+			\frac{1}{p^2}\frac{\partial}{\partial p}\left( p^2 E_\Vert\xi f_e\right) + 
+			\frac{\partial}{\partial\xi}\left[\left(1-\xi^2\right)\frac{E_\Vert}{p}f_e\right]
+			}_\textrm{electric field} + \\
+&\underbrace{
+			\frac{1}{p^2}\frac{\partial}{\partial p}\left[\alpha\gamma p\left(1-\xi^2\right)\right] +
+			\frac{\partial}{\partial\xi}\left[\alpha\frac{\xi}{\gamma}\left(1-\xi^2\right)\right]
+			}_\textrm{synchrotron radiation} + \\
+&= \underbrace{
+		C_\mathrm{B}\mathscr{L} + 
+		\frac{1}{p^2}\frac{\partial}{\partial p}\left[p^2\left(C_\mathrm{F}f_e + C_\mathrm{A}\frac{\partial f_e}{\partial p}\right)\right]
+		}_\textrm{Fokker-Planck collision operator},
+\end{aligned}
+\end{equation}
+where we have normalized time to $t \to t/\tau_c$ with relativistic collision time $\tau_c = 4\pi\epsilon_0^2m_e^2c^3/(e^4n_e\ln\Lambda)$, and the parallel electric field (assumed to be the dominant component) to $E_\Vert \to E_\Vert/E_c$ with the Connor-Hastie electric field $E_c = m_ec/(e\tau_c)$, the Lorentz factor $\gamma = \sqrt{1+p^2}$, and the characteristic synchrotron radiation strength is given by $\alpha = \tau_c/\tau_s$ with characteristic synchrotron timescale of $\tau_s = 6\pi\epsilon_0m_e^3c^3/(e^4B^2)$ and magnetic field strength $B$. 
+
+\JA{The motivation for the particular flow of the derivation was to provide a clear methodology in how one can take the general adjoint relation in the context of the Fokker-Planck equation, and, using the Green's function, can simplify the resulting adjoint relation into something that contains a useful physical interpretation. I found this to be more intuitive than trying to do the mental gymnastics of going through both the backward derivation (Chang's first adjoint paper) and the forward Green's function derivation (Chang's second paper), as well as demystifying for myself if a particle balance relation is needed, which seems to be more of a conservation check after all the algebra is carried out, and the Green's function, along with enforcing causality, is applied.}
+
+Let $\mathcal{A}[\mathcal{F}]$ be the time-dependent Fokker-Planck operator, which can be written in conservative form as
+\begin{subequations}\label{eq:AFP2}
+\begin{equation}\label{eq:AFP2a}
+\mathcal{A}[\mathcal{F}] \equiv 
+	\frac{\partial\mathcal{F}}{\partial t} + 
+	\frac{1}{p^2}\frac{\partial}{\partial p}\left( p^2 \Gamma_p[\mathcal{F}]\right) + 
+	\frac{\partial}{\partial\xi} \Gamma_\xi[\mathcal{F}],
+\end{equation}
+\begin{equation}\label{eq:AFP2b}
+\Gamma_p[\mathcal{F}] = U_p\mathcal{F} - D_p\frac{\partial\mathcal{F}}{\partial p}, \quad 
+\Gamma_\xi[\mathcal{F}] = U_\xi\mathcal{F} - D_\xi\frac{\partial\mathcal{F}}{\partial\xi},
+\end{equation}
+\begin{equation}\label{eq:AFP2c}
+U_p = -E_\Vert\xi - C_\mathrm{F} - \alpha p\gamma(1-\xi^2), \quad U_\xi = (1-\xi^2)\left(-\frac{E_\Vert}{p} + \frac{\alpha\xi}{\gamma}\right),
+\end{equation}
+\begin{equation}\label{eq:AFP2d}
+D_p = C_\mathrm{A}, \quad D_\xi = C_\mathrm{B}(1-\xi^2),
+\end{equation}
+\end{subequations}
+where $\Gamma_{(\cdot)}$ is the flux, and $U_{(\cdot)}, D_{(\cdot)}$ are the convective and diffusive flows, respectively. The adjoint relation is given by
+\begin{equation}\label{eq:AFP3}
+\langle \mathcal{G,AF}\rangle_\Omega = \langle \mathcal{A}^\dagger\mathcal{G,F}\rangle_\Omega,
+\end{equation}
+where $\langle\cdot,\cdot\rangle_{\Omega_{t,\mathbf{p}}}$ is an inner product over a given domain $\Omega_{t,\mathbf{p}}$ in time and momentum space. Equation~\ref{eq:AFP3} is evaluated by first expressing the inner product between two arbitrary functions $(A,B)$ in integral form, i.e.
+\begin{equation}\label{eq:AFP4}
+\langle A,B\rangle_{\Omega_{t,\mathbf{p}}} = \int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t\int\displaylimits_{\Omega_\mathbf{p}}\mathrm{d^3p} \ A(\mathbf{p},t)B(\mathbf{p},t).
+\end{equation}
+The Fokker-Planck operator given by Equation~\ref{eq:AFP2a} can now be inserted into the left hand side of Equation~\ref{eq:AFP3} using the relation in Equation~\ref{eq:AFP4}, yielding
+\begin{equation}\label{eq:AFP5}
+	\langle\mathcal{G,AF}\rangle_{\Omega_{t,\mathbf{p}}} = 
+	\int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+	\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi p^2 \mathrm{d}p
+	\int\displaylimits_{-1}^{1}\mathrm{d}\xi \ 
+		\mathcal{G}\left[ 
+		\frac{\partial\mathcal{F}}{\partial t} + 
+		\frac{1}{p^2}\frac{\partial}{\partial p}\left(p^2\Gamma_p\left[\mathcal{F}\right]\right) + 
+		\frac{\partial}{\partial\xi}\Gamma_\xi\left[\mathcal{F}\right]
+		\right],
+\end{equation}
+which can be evaluated in pieces. We thus expand Equation~\ref{eq:AFP5} to
+\begin{equation}\label{eq:AFP6}
+\begin{aligned}
+	\langle\mathcal{G,AF}\rangle_{\Omega_{t,\mathbf{p}}} &= 
+	\int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+	\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi p^2 \mathrm{d}p
+	\int\displaylimits_{-1}^{1}\mathrm{d}\xi \mathcal{G}\frac{\partial\mathcal{F}}{\partial t} \\
+	&+ 	\int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+	\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi p^2 \mathrm{d}p
+	\int\displaylimits_{-1}^{1}\mathrm{d}\xi \mathcal{G}\frac{1}{p^2}\frac{\partial}{\partial p}\left(\Gamma_p\left[\mathcal{F}\right]\right) \\
+	&+ 	\int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+	\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi p^2 \mathrm{d}p
+	\int\displaylimits_{-1}^{1}\mathrm{d}\xi \mathcal{G}\frac{\partial}{\partial\xi}\Gamma_\xi\left[\mathcal{F}\right],
+\end{aligned}
+\end{equation}
+and proceed to evaluate all the terms, generally through integration by parts. Beginning with the time derivative term, we shall first rearrange the integrals and then perform integration by parts, yielding
+\begin{equation}\label{eq:AFP7}
+\begin{aligned}
+	\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi p^2 \mathrm{d}p
+	\int\displaylimits_{-1}^{1}\mathrm{d}\xi
+	\int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t \ 
+	 \mathcal{G}\frac{\partial\mathcal{F}}{\partial t} &= 
+	 \int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi p^2 \mathrm{d}p
+	\int\displaylimits_{-1}^{1}\mathrm{d}\xi \left[\mathcal{GF}\right]_{t_\mathrm{initial}}^{t_\mathrm{final}} \\
+	&-
+	\int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t 
+	\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi p^2 \mathrm{d}p
+	\int\displaylimits_{-1}^{1}\mathrm{d}\xi \mathcal{F}\frac{\partial\mathcal{G}}{\partial t},
+\end{aligned}
+\end{equation}
+and we can repeat the similar procedure for the remaining terms. Moving to the second term in Equation~\ref{eq:AFP6} we have
+\begin{subequations}\label{eq:AFP8}
+\begin{equation}\label{eq:AFP8a}
+\begin{aligned}
+\int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi \cancel{p^2} \mathrm{d}p 
+	\mathcal{G}\cancel{\frac{1}{p^2}}\frac{\partial}{\partial p}\left(p^2\Gamma_p\left[\mathcal{F}\right]\right) &=
+	\int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi \
+2\pi \left[\mathcal{G}p^2\Gamma_p\left[\mathcal{F}\right]\right]_{p_\mathrm{min}}^{p_\mathrm{max}} \\
+&- \int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi \mathrm{d}p \
+\frac{\partial\mathcal{G}}{\partial p}p^2\Gamma_p\left[\mathcal{F}\right], 
+\end{aligned}
+\end{equation}
+and inserting $\Gamma_p[\mathcal{F}]$ from Equation~\ref{eq:AFP2b} into the second term gives
+\begin{equation}\label{eq:AFP8b}
+\begin{aligned}
+\int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi \mathrm{d}p 
+	\mathcal{G}\frac{\partial}{\partial p}\left(p^2\Gamma_p\left[\mathcal{F}\right]\right) &=
+	\int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi \ 2\pi
+	\left[\mathcal{G}p^2\Gamma_p\left[\mathcal{F}\right]\right]_{p_\mathrm{min}}^{p_\mathrm{max}} \\
+	&- \int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi \mathrm{d}p \  \frac{\partial\mathcal{G}}{\partial p} p^2 \left( U_p\mathcal{F} - D_p\frac{\partial\mathcal{F}}{\partial p}\right) \\
+\Rightarrow &\int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi \ 2\pi
+	\left[\mathcal{G}p^2\Gamma_p\left[\mathcal{F}\right]\right]_{p_\mathrm{min}}^{p_\mathrm{max}} \\
+	&- \int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi \mathrm{d}p \  p^2 U_p\frac{\partial\mathcal{G}}{\partial p}\mathcal{F}\\
+&+ \int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi \mathrm{d}p \ p^2 D_p\frac{\partial\mathcal{G}}{\partial p} \frac{\partial\mathcal{F}}{\partial p},
+\end{aligned}
+\end{equation}
+which requires another iteration of integration by parts, yielding
+\begin{equation}\label{eq:AFP8c}
+\begin{aligned}
+\int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi \mathrm{d}p 
+	\mathcal{G}\frac{\partial}{\partial p}\left(p^2\Gamma_p\left[\mathcal{F}\right]\right) &=
+	\int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi \ 2\pi
+	\left[\mathcal{G}p^2\Gamma_p\left[\mathcal{F}\right]\right]_{p_\mathrm{min}}^{p_\mathrm{max}} \\
+&- \int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi \mathrm{d}p \  p^2 U_p\frac{\partial\mathcal{G}}{\partial p} \mathcal{F}\\
+&+ \int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi \ 2\pi \left[p^2D_p\frac{\partial\mathcal{G}}{\partial p}\mathcal{F}\right]_{p_\mathrm{min}}^{p_\mathrm{max}} \\
+&- \int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi \int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi \mathrm{d}p \ 
+\mathcal{F}\frac{\partial}{\partial p}\left(p^2D_p\frac{\partial\mathcal{G}}{\partial p}\right),
+\end{aligned}
+\end{equation}
+and the first, third terms and second, fourth terms on the right hand side can be combined, thus arriving at
+\begin{equation}\label{eq:AFP8d}
+\begin{aligned}
+\int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi \mathrm{d}p 
+	\mathcal{G}\frac{\partial}{\partial p}\left(p^2\Gamma_p\left[\mathcal{F}\right]\right) &=
+	\int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi \ 2\pi
+	\left[p^2\left(\mathcal{G}\Gamma_p\left[\mathcal{F}\right] + D_p\frac{\partial\mathcal{G}}{\partial p}\mathcal{F}\right)\right]_{p_\mathrm{min}}^{p_\mathrm{max}} \\
+	- &\int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi \mathrm{d}p \ \mathcal{F} \left[ p^2U_p\frac{\partial\mathcal{G}}{\partial p} + \frac{\partial}{\partial p}\left(p^2D_p\frac{\partial\mathcal{G}}{\partial p}\right)\right].
+\end{aligned}
+\end{equation}
+\end{subequations}
+For the last term in Equation~\ref{eq:AFP6}, rearranging the integrals and integrating by parts yields
+\begin{subequations}\label{eq:AFP9}
+\begin{equation}\label{eq:AFP9a}
+\begin{aligned}
+\int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi p^2 \mathrm{d}p
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi \ \mathcal{G}\frac{\partial}{\partial\xi}\Gamma_\xi\left[\mathcal{F}\right] &= \int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi p^2 \mathrm{d}p \left[\mathcal{G}\Gamma_\xi\left[\mathcal{F}\right]\right]^{1}_{-1} \\
+&- \int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi p^2 \mathrm{d}p
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi \ \frac{\partial\mathcal{G}}{\partial\xi}\Gamma_\xi\left[\mathcal{F}\right],
+\end{aligned} 
+\end{equation}
+and we can note that the first term vanishes, due to the $(1-\xi^2)$ factors in Equations~\ref{eq:AFP2c} and \ref{eq:AFP2d}. Inserting $\Gamma_\xi[\mathcal{F}]$ given in Equation~\ref{eq:AFP2b} yields
+\begin{equation}\label{eq:AFP2b}
+\begin{aligned}
+\int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi p^2 \mathrm{d}p
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi \ \mathcal{G}\frac{\partial}{\partial\xi}\Gamma_\xi\left[\mathcal{F}\right] &= -\int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi p^2 \mathrm{d}p
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi \ \frac{\partial\mathcal{G}}{\partial\xi}\left[U_\xi\mathcal{F} - D_\xi\frac{\partial\mathcal{F}}{\partial\xi}\right] \\
+\Rightarrow &-\int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi p^2 \mathrm{d}p
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi \ U_\xi\frac{\partial\mathcal{G}}{\partial\xi}\mathcal{F} \\
+&+ \int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi p^2 \mathrm{d}p
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi \ D_\xi\frac{\partial\mathcal{G}}{\partial\xi}\frac{\partial\mathcal{F}}{\partial\xi},
+\end{aligned}
+\end{equation}
+where the last term requires another integration by parts, yielding
+\begin{equation}\label{eq:AFP9c}
+\begin{aligned}
+\int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi p^2 \mathrm{d}p
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi \ \mathcal{G}\frac{\partial}{\partial\xi}\Gamma_\xi\left[\mathcal{F}\right] &= -\int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi p^2 \mathrm{d}p
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi \ U_\xi\frac{\partial\mathcal{G}}{\partial\xi}\mathcal{F} \\
+&+ \int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi p^2 \mathrm{d}p \left[D_\xi\frac{\partial\mathcal{G}}{\partial\xi}\mathcal{F}\right]_{-1}^{1} \\
+&- \int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi p^2 \mathrm{d}p
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi \ \mathcal{G}\frac{\partial}{\partial\xi}\left(D_\xi\frac{\partial\mathcal{G}}{\partial\xi}\right),
+\end{aligned}
+\end{equation}
+and we can again note the second term vanishes from the $(1-\xi^2)$ factor. Combining the first, third terms on the right hand side yields
+\begin{equation}\label{eq:AFP9d}
+\begin{aligned}
+\int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi p^2 \mathrm{d}p
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi \ \mathcal{G}\frac{\partial}{\partial\xi}\Gamma_\xi\left[\mathcal{F}\right] &= -\int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi p^2 \mathrm{d}p
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi \ \mathcal{F}\left[U_\xi\frac{\partial\mathcal{G}}{\partial\xi} + \frac{\partial}{\partial\xi}\left(D_\xi\frac{\partial\mathcal{G}}{\partial\xi}\right)\right].
+\end{aligned}
+\end{equation}
+\end{subequations}
+Equations~\ref{eq:AFP7},~\ref{eq:AFP8d}, and~\ref{eq:AFP9d} can now be inserted into the left hand side of Equation~\ref{eq:AFP6} yielding
+\begin{equation}\label{eq:AFP10}
+\begin{aligned}
+\langle\mathcal{G,AF}\rangle_{\Omega_{t,\mathbf{p}}} &= \int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi p^2 \mathrm{d}p
+	\int\displaylimits_{-1}^{1}\mathrm{d}\xi \left[\mathcal{GF}\right]_{t_\mathrm{initial}}^{t_\mathrm{final}} \\
+	&+ \int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi \ 2\pi
+	\left[p^2\left(\mathcal{G}\Gamma_p\left[\mathcal{F}\right] + \frac{\partial\mathcal{G}}{\partial p}D_p\mathcal{F}\right)\right]_{p_\mathrm{min}}^{p_\mathrm{max}} \\
+	&+ \int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi \mathrm{d}p \ \mathcal{F} \left[ -\frac{\partial\mathcal{G}}{\partial t} -\frac{\partial\mathcal{G}}{\partial p}p^2U_p - \frac{\partial}{\partial p}\left(p^2D_p\frac{\partial\mathcal{G}}{\partial p}\right) - U_\xi\frac{\partial\mathcal{G}}{\partial\xi} - \frac{\partial}{\partial\xi}\left(D_\xi\frac{\partial\mathcal{G}}{\partial\xi}\right)\right],
+\end{aligned}
+\end{equation}
+and the adjoint operator is identified in the last term, i.e.
+\begin{equation}\label{eq:AFP11}
+\mathcal{A}^\dagger[\mathcal{G}] \equiv -\frac{\partial\mathcal{G}}{\partial t} -\frac{\partial\mathcal{G}}{\partial p}p^2U_p - \frac{\partial}{\partial p}\left(p^2D_p\frac{\partial\mathcal{G}}{\partial p}\right) - U_\xi\frac{\partial\mathcal{G}}{\partial\xi} - \frac{\partial}{\partial\xi}\left(D_\xi\frac{\partial\mathcal{G}}{\partial\xi}\right),
+\end{equation}
+which allows Equation~\ref{eq:AFP10} to be written as
+\begin{equation}\label{eq:AFP12}
+\begin{aligned}
+\langle\mathcal{G,AF}\rangle_{\Omega_{t,\mathbf{p}}} &= \int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi p^2 \mathrm{d}p
+	\int\displaylimits_{-1}^{1}\mathrm{d}\xi \left[\mathcal{GF}\right]_{t_\mathrm{initial}}^{t_\mathrm{final}} \\
+	&+ \int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi \ 2\pi
+	\left[p^2\left(\mathcal{G}\Gamma_p\left[\mathcal{F}\right] + \frac{\partial\mathcal{G}}{\partial p}D_p\mathcal{F}\right)\right]_{p_\mathrm{min}}^{p_\mathrm{max}} \\
+	&+ \int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi \mathrm{d}p \ \mathcal{A}^\dagger\mathcal{GF},
+\end{aligned}
+\end{equation}
+and we can re write the left hand side in integral form to arrive at the final expression, i.e.
+\begin{equation}\label{eq:AFP13}
+\begin{aligned}
+\int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{\Omega_\mathbf{p}}\mathrm{d^3p} \ \mathcal{GAF}
+ &= \int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi p^2 \mathrm{d}p
+	\int\displaylimits_{-1}^{1}\mathrm{d}\xi \left[\mathcal{GF}\right]_{t_\mathrm{initial}}^{t_\mathrm{final}} \\
+	&+ \int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi \ 2\pi
+	\left[p^2\left(\mathcal{G}\Gamma_p\left[\mathcal{F}\right] + \frac{\partial\mathcal{G}}{\partial p}D_p\mathcal{F}\right)\right]_{p_\mathrm{min}}^{p_\mathrm{max}} \\
+	&+ \int\displaylimits_{t_\mathrm{initial}}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi \mathrm{d}p \ \mathcal{A}^\dagger\mathcal{GF}.
+\end{aligned}
+\end{equation}
+
+The physical meaning of Equation~\ref{eq:AFP13} can be made clear by setting the forward function $\mathcal{F}$ (the electron distribution in this case) to satisfy a Green's function $\mathcal{F}(\mathbf{p},t;\mathbf{p}_0,t_0)$, thus giving a single particle picture. \JA{A curious thought is if prescriptions for $\mathcal{AF}$ other than the Green's function can be useful here.} The Green's function thus satisfies
+\begin{equation}\label{eq:AFP14}
+\mathcal{A}[\mathcal{F}] = \delta_\mathbf{p}(\mathbf{p}-\mathbf{p}_0)\delta(t-t_0),
+\end{equation}
+where $t_\mathrm{initial} < t_0 < t_\mathrm{final}$ should be satisfied, and inserting Equation~\ref{eq:AFP14} into the left hand side of Equation~\ref{eq:AFP13} yields
+\begin{equation}\label{eq:AFP15}
+\begin{aligned}
+\int\displaylimits_{t_0}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{\Omega_\mathbf{p}}\mathrm{d^3p} \ \mathcal{G} \delta_\mathbf{p}(\mathbf{p}-\mathbf{p}_0)\delta(t-t_0)
+ &= \int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi p^2 \mathrm{d}p
+	\int\displaylimits_{-1}^{1}\mathrm{d}\xi \left[\mathcal{GF}\right]_{t_\mathrm{initial}}^{t_\mathrm{final}} \\
+	&+ \int\displaylimits_{t_0}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi \ 2\pi
+	\left[p^2\left(\mathcal{G}\Gamma_p\left[\mathcal{F}\right] + \frac{\partial\mathcal{G}}{\partial p}D_p\mathcal{F}\right)\right]_{p_\mathrm{min}}^{p_\mathrm{max}} \\
+	&+ \int\displaylimits_{t_0}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi \mathrm{d}p \ \mathcal{A}^\dagger\mathcal{GF},
+\end{aligned}
+\end{equation}
+which, after evaluating the delta functions, yields
+\begin{equation}\label{eq:AFP16}
+\begin{aligned}
+\mathcal{G}(\mathbf{p}_0,t_0)
+ &= \int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi p^2 \mathrm{d}p
+	\int\displaylimits_{-1}^{1}\mathrm{d}\xi \left[\mathcal{GF}\right]_{t_\mathrm{initial}}^{t_\mathrm{final}} \\
+	&+ \int\displaylimits_{t_0}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi \ 2\pi
+	\left[p^2\left(\mathcal{G}\Gamma_p\left[\mathcal{F}\right] + \frac{\partial\mathcal{G}}{\partial p}D_p\mathcal{F}\right)\right]_{p_\mathrm{min}}^{p_\mathrm{max}} \\
+	&+ \int\displaylimits_{t_0}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi
+\int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}2\pi \mathrm{d}p \ \mathcal{A}^\dagger\mathcal{GF},
+\end{aligned}
+\end{equation}
+and written more compactly as
+\begin{equation}\label{eq:AFP17}
+\begin{aligned}
+\mathcal{G}(\mathbf{p}_0,t_0)
+ &= \int\displaylimits_{\Omega_\mathbf{p}}\mathrm{d^3p}
+	 \left[\mathcal{GF}\right]_{t_0}^{t_\mathrm{final}} \\
+	&+ \int\displaylimits_{t_0}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi \ 2\pi
+	\left[p^2\left(\mathcal{G}\Gamma_p\left[\mathcal{F}\right] + \frac{\partial\mathcal{G}}{\partial p}D_p\mathcal{F}\right)\right]_{p_\mathrm{min}}^{p_\mathrm{max}} \\
+	&+ \int\displaylimits_{t_0}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{\Omega_\mathbf{p}}\mathrm{d^3p} \ \mathcal{A}^\dagger\mathcal{GF},
+\end{aligned}
+\end{equation}
+and we can note that enforcing causality on the Green's function implies $\mathcal{F}(\mathbf{p},t;\mathbf{p}_0,t_0) = 0$ for $t<t_0$ \JA{Double check this}, hence the contribution of the quantity $\mathcal{GF}$ at $t=t_0$ in the first term on the right hand side of Equation~\ref{eq:AFP17} will vanish. In addition, the boundary flux (second term in Equation~\ref{eq:AFP17}) at $t=t_0$ also will vanish, thus we are left with the instantaneous boundary flux, and we arrive at the final expression of the derivation given by
+\begin{equation}\label{eq:AFP18}
+\begin{aligned}
+\mathcal{G}(\mathbf{p}_0,t_0)
+ &= \int\displaylimits_{\Omega_\mathbf{p}}\mathrm{d^3p}
+	 \ \mathcal{G}(\mathbf{p},t_\mathrm{final})\mathcal{F}(\mathbf{p},t;\mathbf{p}_0,t_0) \\
+	&+ \int\displaylimits_{t_0}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{-1}^{1}\mathrm{d}\xi \ 2\pi
+	\left[p^2\left(\mathcal{G}\Gamma_p\left[\mathcal{F}\right] + \frac{\partial\mathcal{G}}{\partial p}D_p\mathcal{F}\right)\right]_{p_\mathrm{min}}^{p_\mathrm{max}} \\
+	&+ \int\displaylimits_{t_0}^{t_\mathrm{final}}\mathrm{d}t
+\int\displaylimits_{\Omega_\mathbf{p}}\mathrm{d^3p} \ \mathcal{A}^\dagger\mathcal{GF},
+\end{aligned}
+\end{equation}
+which implies that $\mathcal{G}$ is a point-wise representation of the adjoint solution. In other words, $\mathcal{G}$ represents the adjoint solution for a single electron, and the more specific physical meaning of the adjoint solution is given by prescribing a particular terminal condition $\mathcal{G}(\mathbf{p},t_\mathrm{final})$, boundary conditions, and $\mathcal{A}^\dagger\mathcal{G}$. For example, if the adjoint operator is chosen to satisfy the homogeneous PDE $(\mathcal{A}^\dagger\mathcal{G} = 0)$, then the last term in Equation~\ref{eq:AFP18} vanishes. For the momentum boundary conditions we can note that both at $p_\mathrm{min} \to 0$ and $p_\mathrm{max} \to \infty$, the electron distribution $\mathcal{F}$ will vanish, with the explanation that, for the upper boundary, it follows that electrons will eventually experience pitch-angle scattering, such that $\Gamma_p<0$, leading to the electrons flowing back to the bulk distribution, where they could potentially re-enter the $\Gamma_p>0$ channel. \JA{TODO: Continue with prescribing the terminal, boundary, and adjoint PDE in Equation~\ref{eq:AFP18} to arrive at the general adjoint solution that contains the clear physical interpretation of being the sum containing the moment of the final electron distribution and the momentum boundary flux. A particle balance relation can be applied to demonstrate that the adjoint relation preserves continuity of the electron distribution. Lastly, the zeroth order moment can then be invoked, which will yield the runaway probability function (RPF), and this should be sufficient for now.}
+%\begin{equation}\label{eq:AFP18}
+%
+%\end{equation}
+%The Green's function will be used to derive the adjoint to the relativistic Fokker-Planck equation in a homogenous plasma, following the recipe given by Refs.~\cite{karney1986current,liu2016adjointavalanche,mcdevittpart12025}. For the external forces, we will consider the electric field acceleration force, and the synchrotron radiation reaction force (Bremsstrahlung is omitted for its negligible contribution for the application of interest). Considering spherical momentum coordinates $\mathbf{p}=[p,\varphi,\vartheta]$, assuming axial symmetry $(\partial/\partial\varphi \to 0)$, and defining the electron pitch-angle as $\xi \equiv \cos\vartheta = \mathbf{p\cdot B}/(pB)$ with the convention of REs pertaining to $\xi = -1$, the Green's function is taken to obey the relativistic Fokker-Planck equation of the form
+%\begin{subequations}\label{eq:FAF1}
+%\begin{equation}\label{eq:FAF1a}
+%\frac{\partial\mathcal{F}(\mathbf{p},t;\mathbf{p}_0,t_0)}{\partial t} + E[\mathcal{F},t] + R[\mathcal{F},t] + C[\mathcal{F},t] = \delta(\mathbf{p}-\mathbf{p}_0)\delta(t-t_0),
+%\end{equation}
+%\begin{equation}\label{eq:FAF1b}
+%E[\mathcal{F},t] = -\frac{1}{p^2}\frac{\partial}{\partial p} \left[ p^2E_\Vert\mathcal{F}(\mathbf{p},t;\mathbf{p}_0,t_0)\right] - \frac{\partial}{\partial\xi}\left[\left(\frac{1-\xi^2}{p}\right)E_\Vert\mathcal{F}(\mathbf{p},t;\mathbf{p}_0,t_0)\right],
+%\end{equation}
+%\begin{equation}\label{eq:FAF1c}
+%R[\mathcal{F},t] = -\frac{1}{p^2}\frac{\partial}{\partial p} \left[ \alpha p^3\gamma(1-\xi^2)\mathcal{F}(\mathbf{p},t;\mathbf{p}_0,t_0)\right] - \frac{\partial}{\partial\xi}\left[\alpha\frac{\xi(1-\xi^2)}{\gamma}\mathcal{F}(\mathbf{p},t;\mathbf{p}_0,t_0)\right],
+%\end{equation}
+%\begin{equation}\label{eq:FAF1d}
+%C[\mathcal{F},t] = -\frac{1}{p^2}\frac{\partial}{\partial p} \left[p^2\left(C_F + C_A\frac{\partial}{\partial p}\right)\mathcal{F}(\mathbf{p},t;\mathbf{p}_0,t_0)\right] - \frac{C_B}{p^2}\frac{\partial}{\partial\xi}\left[ (1-\xi^2)\frac{\partial\mathcal{F}(\mathbf{p},t;\mathbf{p}_0,t_0)}{\partial\xi}\right],
+%\end{equation}
+%\end{subequations}
+%where the following normalizations are applied. time is normalized to $t \to t/\tau_c$ with relativistic collision time $\tau_c = 4\pi\epsilon_0^2m_e^2c^3/(e^4n_e\ln\Lambda)$, the relativistic momentum is normalized to $p \to \gamma mv/(m_ec)$ with Lorentz factor $\gamma = \sqrt{1+p^2}$, the parallel electric field (assumed to be the dominant component) is normalized to $E_\Vert \to E_\Vert/E_c$ with the Connor-Hastie electric field $E_c = m_ec/(e\tau_c)$, and the characteristic synchrotron radiation strength is given by $\alpha = \tau_c/\tau_s$ with characteristic synchrotron timescale of $\tau_s = 6\pi\epsilon_0m_e^3c^3/(e^4B^2)$ and magnetic field strength $B$. The suprathermal test-particle collision operator $C[\mathcal{F},t]$ assumes collisions with a Maxwellian background and is valid for arbitrary energies~\cite{papp2011runaway}, and the coefficients for the collisional diffusivity $C_A$, friction $C_F$, and deflection $C_B$ are given by
+%\begin{subequations}\label{eq:FAF2}
+%\begin{equation}\label{eq:FAF2a}
+%C_A = \frac{\gamma}{p}\psi(x), 
+%\end{equation}
+%\begin{equation}\label{eq:FAF2b}
+%C_F = \frac{2}{v_{Te}^2}\psi(x)\left(\frac{\ln\Lambda_{ee}}{\ln\Lambda_0}\right)\left\{1 + \frac{1}{\ln\lambda_{ee}}\sum_sn_{\textrm{bound},s}\left[\frac{1}{k}\ln\left(1+h_s^k\right)-v^2\right]\right\},
+%\end{equation}
+%\begin{equation}\label{eq:FAF2c}
+%C_B = \frac{\gamma}{p^3}\frac{\ln\Lambda_{ei}}{\ln\Lambda_0}Z_\textrm{eff}\left\{1 + \frac{1}{Z_\textrm{eff}\ln\Lambda_{ei}}\sum_sn_{\textrm{bound},s}g_s + \frac{\ln\Lambda_{ee}}{\ln\Lambda_0}\left[\phi(x) - \psi(x) + \frac{1}{2v_{Te}^4}x^2\right] \right\},
+%\end{equation}
+%\end{subequations}
+%where $x = v/v_{T_e}$, the normalized velocity is $v \to v/c = p/\gamma$, and the Chandrasekhar function is $\psi(x)$, the error function is $\phi(x)$, and the bound electron density for a given species $s$ is $n_\textrm{bound}$. The thermal~\cite{wesson2011tokamaks} and suprathermal~\cite{solodov2008stopping} Coulomb logarithms are given by
+%\begin{subequations}\label{eq:FAF3}
+%\begin{equation}\label{eq:FAF3a}
+%\ln\Lambda_0 = 14.9 - \frac{1}{2}\ln\left(\frac{n_e}{10^{20} \ \textrm{m}^{-3}}\right) + \ln\left(\frac{T_e}{10^3 \ \textrm{eV}}\right),
+%\end{equation}
+%\begin{equation}\label{eq:FAF3b}
+%\ln\Lambda_{ee} = \ln\Lambda_0 + \frac{1}{k}\ln\left[1 + 2^{k/2}\left(\frac{\gamma-1}{p_{Te}^2}\right)^{k/2}\right],
+%\end{equation}
+%\begin{equation}\label{eq:FAF3c}
+%\ln\Lambda_{ei} = \ln\Lambda_0 + \frac{1}{k}\ln\left[1 + \left(\frac{2p}{p_{Te}}\right)^k\right],
+%\end{equation}
+%\end{subequations}
+%where $p_{Te}$ is the thermal momentum. Finally, the collisional friction $C_F$ and deflection $C_B$ coefficients contain ``partial screening'' corrections that account for relativistic electrons interacting with the bound electron cloud when colliding with a partially ionized ion, utilize an asymptotic matching parameter $k=5$, and the partial screening correction factors are given by~\cite{hesslow2017effect}
+%\begin{subequations}\label{eq:FAF4}
+%\begin{equation}\label{eq:FAF4a}
+%g_s = \frac{2}{3}\left(Z_{0,s}^2 - Z_s^2\right)\ln\left(y_s^{3/2}+1\right) - \frac{2}{3}\frac{n_{\textrm{bound},s}^2y_s^{3/2}}{y_s^{3/2} + 1},
+%\end{equation}
+%\begin{equation}\label{eq:FAF4b}
+%h_s = \frac{p\sqrt{\gamma-1}m_ec^2}{I_s},
+%\end{equation}
+%\end{subequations} 
+%where $Z_{0,s}$ is the species atomic number, $Z_s$ is the species charge state, $I_s$ is the species mean excitation energy at a given charge state, and $y_s = 2a_sp/\alpha_{fs}$ with fine structure constant $\alpha_{fs}$ and effective ion size in units of Borh radii $a_s$ (tabulated values for $I_s, a_s$ are given in Table A1 of Ref.~\cite{hesslow2018effect}).
+%
+%The basic equations have now been defined, and the derivation of the adjoint formulation shall now be done. For convenience, the forward Fokker-Planck equation is written as
+%\begin{equation}\label{eq:FAF5}
+%\frac{\partial\mathcal{F}}{\partial t} + \mathcal{LF} = \delta(\mathbf{p}-\mathbf{p}_0)\delta(t-t_0),
+%\end{equation}
+%where $\mathcal{F}$ is the Green's function, and $\mathcal{L}$ is the forward operator given by
+%\begin{equation}\label{eq:FAF6}
+%\mathcal{L} = E[\mathcal{F},t] + C[\mathcal{C},t] + R[\mathcal{R},t].
+%\end{equation}
+%The adjoint relation is given by
+%\begin{equation}\label{eq:FAF7}
+%\langle \mathcal{G,F} \rangle \equiv \int_{\Omega_p}\mathrm{d^3p}\mathcal{GF} = 2\pi \int\displaylimits_{p_\mathrm{min}}^{p_\mathrm{max}}\mathrm{dp} p^2 \int\displaylimits_{-1}^{1}\mathrm{d}\xi\mathcal{GF}
+%\end{equation}
+
+\bibliographystyle{apsrev}
+\bibliography{./ref}
+
+\end{document}
