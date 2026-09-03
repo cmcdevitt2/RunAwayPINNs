@@ -21,8 +21,9 @@ print("nvmath:", nvmath.__version__)
 PY
 ```
 
-The expected JAX backend is `cuda`, and Warp must list at least one CUDA
-device. If either check reports CPU-only execution, stop the job and inspect
+JAX may report its GPU backend as `gpu`; confirm `jax.devices()` includes a CUDA
+device, and Warp must list at least one CUDA device. If either check reports
+CPU-only execution, stop the job and inspect
 the allocated GPU, modules, environment, and CUDA library paths.
 
 ## Adjoint FV job
@@ -91,6 +92,14 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 python pinn_training.py --config pinn_training.toml
+```
+
+Create the Slurm log directories before submission because Slurm opens output
+paths before executing the script:
+
+```bash
+mkdir -p logs data outputs
+sbatch pinn.slurm
 ```
 
 Start with reduced `Np`, `Nxi`, case counts, collocation counts, and optimizer

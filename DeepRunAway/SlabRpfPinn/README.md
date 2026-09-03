@@ -11,9 +11,9 @@ steady 0D--2P relativistic runaway-electron first-passage problem.
 - `pinn_training.toml`: training configuration and parameter domain.
 - `docs/HIPERGATOR.md`: required Hipergator GPU batch-job workflow.
 
-The LaTeX model specification is the numerical and physical contract for these
-codes. The solver is a prescribed-parameter, spatially homogeneous test-particle
-model; it is not a self-consistent plasma evolution code.
+The solver is a prescribed-parameter, spatially homogeneous test-particle model;
+it is not a self-consistent plasma evolution code. Preserve the physical and
+numerical contract represented by the source and configuration files.
 
 ## Software model
 
