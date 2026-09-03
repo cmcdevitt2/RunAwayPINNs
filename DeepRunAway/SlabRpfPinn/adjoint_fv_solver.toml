@@ -1,0 +1,39 @@
+# Small GPU qualification case for adjoint_fv_solver.py.
+# Increase grid size only inside a Slurm GPU allocation.
+
+[plasma]
+te_eV = 100.0
+E_over_Ec = 10.0
+B_T = 5.3
+
+[[plasma.species]]
+name = "D"
+Z = 1
+Zavg = 1.0
+density_m3 = 1.0e20
+
+[[plasma.species]]
+name = "Ne"
+Z = 10
+Zavg = 1.0
+density_m3 = 1.0e18
+
+[collisions]
+energy_diffusion = false
+
+[grid]
+Np = 256
+Nxi = 128
+pmin = 0.001
+pmax = 50.0
+
+[solve]
+mode = "steady"
+
+[runtime]
+device = "cuda:0"
+
+[output]
+write = true
+path = "outputs/adjoint_rpf.npz"
+save_every = 0

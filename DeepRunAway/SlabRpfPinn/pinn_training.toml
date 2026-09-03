@@ -1,0 +1,87 @@
+# FV-assisted fully parametric steady-RPF PINN training experiment.
+
+[fv]
+solver_script = "adjoint_fv_solver.py"
+generate = true
+dataset_file = "data/parametric_rpf_fv_dataset.npz"
+parameter_seed = 1234
+n_train_cases = 100
+n_validation_cases = 25
+Np = 1024
+Nxi = 512
+pmin = 0.001
+pmax = 50.0
+B_T = 5.3
+device = "cuda:0"
+energy_diffusion = false
+
+[domain]
+# The six parametric dimensions. E is normalized E/Ec.
+e_parallel_min = 1.0
+e_parallel_max = 1000.0
+e_parallel_sampling = "log"
+
+te_min_ev = 1.0
+te_max_ev = 100.0
+te_sampling = "log"
+
+nD_min_m3 = 1.0e20
+nD_max_m3 = 1.0e22
+nD_sampling = "log"
+
+nImp_min_m3 = 1.0e16
+nImp_max_m3 = 1.0e22
+nImp_sampling = "log"
+
+zDavg_min = 0.01
+zDavg_max = 1.0
+zImpavg_min = 0.01
+zImpavg_max = 10.0
+
+impurity_name = "Ne"
+impurity_Z = 10
+
+[training]
+seed = 4321
+sampling_seed = 5678
+width = 32
+depth = 4
+
+# Adam uses one fixed full training set. SSBroyden runs in blocks; each block
+# resets the inverse-Hessian approximation. PDE/BC points may optionally be
+# resampled between blocks while FV labels remain fixed.
+n_pde = 1048576
+n_bc = 262144
+fv_points_per_case = 8192      # <=0 means use every FV cell in every training case
+interior_eps = 1.0e-6
+
+# XLA-internal reduction chunks. These do not change the full-batch objective.
+# Set any training-loss chunk to 0 to evaluate that complete loss in one XLA call.
+# The B200 test config below uses whole-batch evaluation.
+pde_chunk = 131072
+bc_chunk = 131072
+fv_chunk = 131072
+validation_chunk = 131072
+
+adam_steps = 5000
+adam_block_steps = 1000
+adam_lr = 2.0e-3
+
+# SSBroyden training protocol. Total nominal steps = blocks * block_iters.
+ssb_blocks = 100
+ssb_block_iters = 10000
+# 0 disables resampling; 1 resamples PDE/BC after every block; N resamples
+# after every N blocks. Each block always starts a fresh inverse-H approximation.
+ssb_resample_every_blocks = 1
+ssb_search = "wolfe"            # "wolfe", "zoom", or "trust_region"
+ssb_rtol = 1.0e-14
+ssb_atol = 1.0e-14
+
+[loss]
+w_pde = 1.0
+w_bc = 1.0
+w_fv = 1.0
+residual_scale = 1.0
+
+[output]
+directory = "outputs/pinn_training"
