@@ -50,6 +50,17 @@ export PYTHONUNBUFFERED=1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
+python - <<'PY'
+import jax
+import warp
+if jax.default_backend() != "gpu":
+    raise SystemExit(f"JAX GPU backend required, got {jax.default_backend()!r}")
+if not any(getattr(device, "is_cuda", False) for device in warp.get_devices()):
+    raise SystemExit(f"Warp CUDA device required, got {warp.get_devices()!r}")
+print("JAX:", jax.default_backend(), jax.devices())
+print("Warp:", warp.get_devices())
+PY
+
 python adjoint_fv_solver.py --config adjoint_fv_solver.toml
 ```
 
@@ -91,6 +102,17 @@ export PYTHONUNBUFFERED=1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
+python - <<'PY'
+import jax
+import warp
+if jax.default_backend() != "gpu":
+    raise SystemExit(f"JAX GPU backend required, got {jax.default_backend()!r}")
+if not any(getattr(device, "is_cuda", False) for device in warp.get_devices()):
+    raise SystemExit(f"Warp CUDA device required, got {warp.get_devices()!r}")
+print("JAX:", jax.default_backend(), jax.devices())
+print("Warp:", warp.get_devices())
+PY
+
 python pinn_training.py --config pinn_training.toml
 ```
 
@@ -111,7 +133,9 @@ project data area, not in Git.
 
 - Record Slurm job ID, Git commit, Python environment, GPU model, and TOML file.
 - Keep stdout and stderr logs with each result directory.
-- Verify `JAX backend: cuda` and `execution=gpu-warp-cudss` in logs.
+- Verify JAX reports backend `gpu` with CUDA devices. Standalone FV logs should
+  contain `execution=gpu-warp-cudss`; PINN logs should contain its JAX and Warp
+  device probes.
 - Check cuDSS residuals, transpose checks, escape identity, and probability
   bounds before treating an FV result as a training label.
 - For PINN runs, retain the copied TOML, training history, summary, and dataset

@@ -38,9 +38,9 @@ efficient model available for deterministic work; reserve the strongest model
 and main context for coupled numerical reasoning, architecture, and integration.
 
 - `cavecrew`: delegate independent, bounded work when it saves time or context.
-  - investigator: locate definitions, callers, references, or runtime assumptions;
-  - builder: clear surgical edit touching at most two files;
-  - reviewer: inspect a staged diff and return findings by path and line.
+  - `cavecrew-investigator`: locate definitions, callers, references, or runtime assumptions;
+  - `cavecrew-builder`: clear surgical edit touching at most two files;
+  - `cavecrew-reviewer`: inspect a staged diff and return findings by path and line.
 - `caveman`: keep agent communication and status reports terse when requested.
 - `caveman-review`: compressed review of a diff or file.
 - `investigate-first`: unknown failure, regression, or performance issue before

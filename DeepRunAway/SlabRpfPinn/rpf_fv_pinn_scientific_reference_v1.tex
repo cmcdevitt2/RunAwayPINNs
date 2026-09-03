@@ -1,0 +1,877 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs,array}
+\usepackage{enumitem}
+\usepackage{float}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+
+\definecolor{accent}{RGB}{35,65,105}
+\definecolor{shade}{RGB}{245,247,250}
+
+\title{\textbf{Steady Runaway Probability Function}\\[2mm]
+Adjoint PDE, Finite-Volume Reference Solver, and FV-Assisted Parametric PINN}
+\author{}
+\date{September 2026}
+
+\newcommand{\p}{p}
+\newcommand{\x}{\xi}
+\newcommand{\g}{\gamma}
+\newcommand{\N}{N}
+\newcommand{\f}{f}
+\newcommand{\Pvec}{\bm P}
+\newcommand{\Nvec}{\bm N}
+\newcommand{\rRE}{\bm r_{\rm RE}}
+\newcommand{\rF}{\bm r_{\rm F}}
+\newcommand{\lam}{\bm\lambda}
+\newcommand{\thetaNN}{\bm\theta}
+\newcommand{\Ecfg}{\mathcal E}
+
+\begin{document}
+\maketitle
+
+\begin{center}
+\fcolorbox{accent}{shade}{\parbox{0.91\textwidth}{
+\textbf{Purpose.} This document is the task-level scientific and numerical reference for the
+steady runaway probability function (RPF).  It is intentionally narrower than the full
+0D--2P kinetic-model reference.  The central objects are: (i) the steady first-passage
+adjoint PDE, (ii) the conservative finite-volume (FV) discrete adjoint used as the numerical
+reference, and (iii) the FV-assisted parametric PINN trained to represent the resulting RPF
+family.  The FV reference, not the PINN, defines the qualified discrete ground truth for this
+task.
+}}
+\end{center}
+
+\medskip
+
+The RPF asks a first-passage question for a tagged electron evolving under the local
+small-angle kinetic generator: starting at $(p,\xi)$, what is the probability that the
+electron exits the represented suprathermal domain through the successful runaway part of
+the outer momentum boundary before it is lost through the lower-momentum failure boundary?
+The answer is a bounded response function
+\begin{equation}
+ 0\le P(p,\xi;\lam)\le 1,
+\end{equation}
+where $\lam$ denotes the prescribed plasma state.
+
+The numerical hierarchy used throughout this document is
+\begin{equation}
+ \boxed{
+ \begin{gathered}
+ \text{local forward generator}
+ \;\longrightarrow\;
+ \text{exact FV transpose and first-passage solve}\\
+ \longrightarrow\;\text{qualified FV labels}
+ \;\longrightarrow\;
+ \text{parametric PINN}.
+ \end{gathered}
+ }
+\end{equation}
+The PINN therefore accelerates evaluation of a model already established by the adjoint FV
+solver; it does not introduce an independent definition of runaway probability.
+
+\tableofcontents
+\newpage
+
+%===============================================================================
+\section{Scope and model hierarchy}
+\label{sec:scope}
+
+This task concerns the \emph{steady} first-passage adjoint.  The following pieces are in
+scope:
+\begin{itemize}[leftmargin=2em]
+ \item a spatially homogeneous, gyrotropic $(p,\xi)$ local electron generator;
+ \item electric acceleration, relativistic small-angle collisions, synchrotron reaction,
+       and the associated open radial boundaries;
+ \item a conservative FV forward generator $L_0$ and its exact algebraic transpose;
+ \item the steady discrete RPF solve $(-L_0^T)\Pvec=\rRE$;
+ \item a parametric neural approximation $P_{\thetaNN}(p,\xi;\lam)$ trained with both the
+       continuum adjoint residual and qualified FV labels;
+ \item coefficient parity, FV refinement, held-out parameter validation, and optimizer/
+       collocation refinement as separate qualification axes.
+\end{itemize}
+
+The following pieces are deliberately outside the present task-level document:
+\begin{itemize}[leftmargin=2em]
+ \item the full forward time-dependent distribution-function program;
+ \item the finite-horizon time-dependent adjoint;
+ \item self-consistent 0D plasma evolution;
+ \item a fully discrete reverse-mode adjoint of a time-marching trajectory;
+ \item differentiation through FV assembly or the sparse direct solver.
+\end{itemize}
+
+The Chiu--Harvey large-angle avalanche operator is also \emph{not} part of the tagged-
+electron first-passage generator.  It is a branching source that creates additional
+electrons.  Once an RPF has been computed, it may be contracted with such a source as a
+response weight, but the branching process is not inserted into $L_0$ when defining the
+single-particle RPF.
+
+%===============================================================================
+\section{Continuous steady first-passage problem}
+\label{sec:continuous_rpf}
+
+\subsection{Phase space and local forward generator}
+
+Use the dimensionless relativistic momentum
+\begin{equation}
+ p=\frac{P}{m_ec},\qquad \gamma=\sqrt{1+p^2},\qquad -1\le\xi\le1.
+\end{equation}
+The represented RPF domain is
+\begin{equation}
+ p_{\min}\le p\le p_{\max},\qquad -1\le\xi\le1,
+\end{equation}
+with $p_{\min}>0$ for the present suprathermal first-passage problem.
+
+The local forward kinetic equation, with branching sources removed, is written in
+conservative form as
+\begin{equation}
+ \frac{\partial f}{\partial\tau}
+ =-\frac{1}{p^2}\frac{\partial}{\partial p}\left(p^2J_p\right)
+  -\frac{\partial J_\xi}{\partial\xi}
+ \equiv \mathcal L_0 f,
+ \label{eq:forward_local}
+\end{equation}
+with
+\begin{align}
+ J_p&=A_p f-C_A\frac{\partial f}{\partial p},\\
+ J_\xi&=A_\xi f-D_\xi\frac{\partial f}{\partial\xi},
+\end{align}
+and
+\begin{align}
+ A_p
+ &=-\bar E\,\xi-\alpha\gamma p(1-\xi^2)-C_F,
+ \label{eq:Ap}\\
+ A_\xi
+ &=(1-\xi^2)\left(-\frac{\bar E}{p}+\alpha\frac{\xi}{\gamma}\right),
+ \label{eq:Axi}\\
+ D_\xi
+ &=\frac{\nu_D}{2}(1-\xi^2).
+ \label{eq:Dxi}
+\end{align}
+Here $C_F$ is collisional radial drag, $C_A$ is radial energy diffusion, $\nu_D$ is the
+pitch-angle deflection frequency, and $\alpha$ is the normalized synchrotron strength.
+The coefficient construction is shared with the qualified kinetic model and may include
+the selected finite-temperature relativistic base, energy-dependent Coulomb logarithms,
+and partial-screening corrections.  No separate adjoint collision model is introduced.
+
+The parametric PINN configuration supplies the electric field as
+\begin{equation}
+ \Ecfg\equiv \frac{|E_\parallel|}{E_c},
+\end{equation}
+and the common physics layer maps the configured plasma state to the normalized operator
+coefficients used in Eqs.~\eqref{eq:Ap}--\eqref{eq:Dxi}.  This notation separates the
+user-facing parameter coordinate $\Ecfg$ from any lower-level reference normalization used
+inside the kinetic implementation.
+
+\subsection{Weighted adjoint PDE}
+
+The physical momentum-space pairing is
+\begin{equation}
+ \langle P,f\rangle_\mu
+ =2\pi\int_{p_{\min}}^{p_{\max}}p^2\,dp
+      \int_{-1}^{1}P(p,\xi)f(p,\xi)\,d\xi.
+ \label{eq:pairing}
+\end{equation}
+Away from the radial boundaries, integration by parts gives the backward operator
+\begin{equation}
+ \boxed{
+ \mathcal L_0^\dagger P
+ =A_p\frac{\partial P}{\partial p}
+ +\frac{1}{p^2}\frac{\partial}{\partial p}
+  \left(p^2C_A\frac{\partial P}{\partial p}\right)
+ +A_\xi\frac{\partial P}{\partial\xi}
+ +\frac{\partial}{\partial\xi}
+  \left(D_\xi\frac{\partial P}{\partial\xi}\right).
+ }
+ \label{eq:continuous_adjoint}
+\end{equation}
+The steady interior RPF satisfies
+\begin{equation}
+ \mathcal L_0^\dagger P=0.
+ \label{eq:continuous_steady}
+\end{equation}
+Equation~\eqref{eq:continuous_adjoint} is the continuum physics equation used by the PINN.
+The production FV RPF is \emph{not} obtained by independently discretizing this equation;
+it is obtained from the exact algebraic transpose of the conservative forward FV generator.
+That distinction is central to the reference-solver architecture.
+
+\subsection{First-passage boundary semantics}
+\label{sec:boundary_semantics}
+
+At the lower radial boundary $p=p_{\min}$, outward loss is defined as failure.  For the RPF,
+\begin{equation}
+ P(p_{\min},\xi)=0.
+ \label{eq:lower_rpf_bc}
+\end{equation}
+
+The outer boundary is zero-inflow/open-outflow.  Its successful runaway subset is defined
+from the same radial drift used by the forward operator,
+\begin{equation}
+ \Gamma_{\rm RE}(\lam)
+ =\left\{(p_{\max},\xi):A_p(p_{\max},\xi;\lam)>0\right\}.
+ \label{eq:success_set}
+\end{equation}
+On that successful subset, the first-passage probability is unity,
+\begin{equation}
+ P(p_{\max},\xi)=1,\qquad (p_{\max},\xi)\in\Gamma_{\rm RE}.
+ \label{eq:upper_rpf_bc}
+\end{equation}
+If $\Gamma_{\rm RE}$ is empty, the successful-escape source vanishes naturally; no
+hard-coded electric-field threshold is introduced.
+
+At $\xi=\pm1$, both pitch drift and pitch diffusion vanish through the factor $1-\xi^2$,
+so the pitch boundaries are natural zero-flux boundaries.
+
+For the current FV-assisted PINN experiments, radial energy diffusion is disabled,
+\begin{equation}
+ C_A=0.
+ \label{eq:no_energy_diffusion}
+\end{equation}
+The FV reference solver retains the more general capability, but the current neural
+residual is intentionally restricted to Eq.~\eqref{eq:no_energy_diffusion}.
+
+%===============================================================================
+\section{Prescribed plasma parameterization}
+\label{sec:parameters}
+
+The current parametric surrogate uses deuterium plus one configurable impurity species.
+The six-dimensional plasma parameter vector is
+\begin{equation}
+ \boxed{
+ \lam=\left(\Ecfg,T_e,n_D,n_I,\overline Z_D,\overline Z_I\right).
+ }
+ \label{eq:lambda}
+\end{equation}
+Together with phase space, the network has eight inputs.
+
+\subsection{Continuous mean-charge representation}
+
+A noninteger mean charge is interpreted as a population mixture of neighboring integer
+charge states \emph{before} collision coefficients are evaluated.  For species $s$ with
+nuclear charge $Z_s$, density $n_s$, and mean charge $\overline Z_s\in[0,Z_s]$, define
+\begin{equation}
+ w_{s,q}(\overline Z_s)=\max\left(0,1-|\overline Z_s-q|\right),
+ \qquad q=0,\ldots,Z_s,
+ \label{eq:charge_weights}
+\end{equation}
+and
+\begin{equation}
+ n_{s,q}=n_s w_{s,q}.
+\end{equation}
+Then
+\begin{equation}
+ \sum_qn_{s,q}=n_s,
+ \qquad
+ \sum_q q n_{s,q}=n_s\overline Z_s.
+\end{equation}
+Quasineutrality and effective charge are therefore
+\begin{align}
+ n_e&=\sum_{s,q}q n_{s,q}=\sum_s n_s\overline Z_s,
+ \label{eq:ne}\\
+ Z_{\rm eff}&=\frac{1}{n_e}\sum_{s,q}q^2 n_{s,q}.
+ \label{eq:zeff}
+\end{align}
+Partial-screening sums use the same resolved integer-state populations.  The FV reference
+and the PINN coefficient layer must perform this same population-first mapping.  Final
+collision coefficients are not interpolated between charge states.
+
+\subsection{Normalized neural coordinates}
+
+The network input is
+\begin{equation}
+ \bm z=(\widehat p,\widehat\xi,\widehat\lam)\in[0,1]^8.
+\end{equation}
+Momentum is logarithmically normalized,
+\begin{equation}
+ \widehat p
+ =\frac{\ln p-\ln p_{\min}}
+        {\ln p_{\max}-\ln p_{\min}},
+ \qquad
+ \widehat\xi=\frac{\xi+1}{2}.
+ \label{eq:phase_norm}
+\end{equation}
+The electric field, temperature, and densities may be mapped linearly or logarithmically
+according to the training configuration; mean charge states are mapped linearly.  The
+physical surrogate domain is therefore a configuration choice rather than a hard-coded
+network property.
+
+%===============================================================================
+\section{Finite-volume reference solver}
+\label{sec:fv_reference}
+
+The FV solver is the numerical reference for the steady RPF.  It first constructs the
+qualified local forward generator and then forms the exact discrete transpose.  The
+reference is therefore a \emph{discretize-then-adjoint} construction.
+
+\subsection{Cell-content state and conservative grid}
+
+The baseline grid is a tensor product with
+\begin{equation}
+ \Delta p=\frac{p_{\max}-p_{\min}}{N_p},\qquad
+ \Delta\xi=\frac{2}{N_\xi},
+\end{equation}
+cell centers
+\begin{equation}
+ p_i=p_{\min}+\left(i-\frac12\right)\Delta p,
+ \qquad
+ \xi_j=-1+\left(j-\frac12\right)\Delta\xi,
+\end{equation}
+and corresponding face locations.  The primary unknown is the physical cell content
+\begin{equation}
+ N_{ij}
+ =2\pi\int_{p_{i-1/2}}^{p_{i+1/2}}p^2\,dp
+      \int_{\xi_{j-1/2}}^{\xi_{j+1/2}}f(p,\xi)\,d\xi.
+ \label{eq:cell_content}
+\end{equation}
+The exact cell phase volume is
+\begin{equation}
+ V_{ij}=\frac{2\pi}{3}\left(p_{i+1/2}^3-p_{i-1/2}^3\right)\Delta\xi,
+ \qquad f_{ij}=\frac{N_{ij}}{V_{ij}}.
+\end{equation}
+Because the phase-space measure is already included in $\bm N$, the discrete dual pairing
+is simply
+\begin{equation}
+ \langle\Pvec,\Nvec\rangle=\Pvec^T\Nvec.
+ \label{eq:discrete_pairing}
+\end{equation}
+There is no additional FV mass matrix in the adjoint problem.
+
+\subsection{Conservative local fluxes}
+
+Integrating Eq.~\eqref{eq:forward_local} over a cell gives
+\begin{equation}
+ \frac{dN_{ij}}{d\tau}
+ =-\left(F^p_{i+1/2,j}-F^p_{i-1/2,j}\right)
+  -\left(F^\xi_{i,j+1/2}-F^\xi_{i,j-1/2}\right).
+ \label{eq:fv_balance}
+\end{equation}
+Each interior face flux is formed once and enters the two neighboring cells with opposite
+signs, so interior conservation is algebraic.
+
+Radial and pitch drifts use first-order upwinding; diffusion uses centered differences.
+For example, at an interior radial face,
+\begin{equation}
+ F^p_{i+1/2,j}
+ =2\pi p_{i+1/2}^2\Delta\xi
+ \left[
+  A^p_{i+1/2,j}f^{p,\mathrm{up}}_{i+1/2,j}
+  -C_{A,i+1/2}\frac{f_{i+1,j}-f_{ij}}{\Delta p}
+ \right].
+ \label{eq:radial_flux}
+\end{equation}
+The pitch-face flux has the analogous upwind/centered structure with $A_\xi$ and $D_\xi$.
+
+At $p=p_{\max}$ the open outer flux is
+\begin{equation}
+ F^p_{N_p+1/2,j}
+ =2\pi p_{\max}^2\Delta\xi
+  \left[A_p(p_{\max},\xi_j)\right]_+f_{N_p,j},
+ \label{eq:outer_flux}
+\end{equation}
+with no incoming exterior distribution.  At the shifted inner boundary, outward loss is
+absorbing failure.  These same boundary terms define the first-passage source vectors used
+below.
+
+\subsection{Discrete generator and exact transpose}
+
+With branching sources disabled, the cell-content system is
+\begin{equation}
+ \boxed{
+ \frac{d\Nvec}{d\tau}=L_0\Nvec.
+ }
+ \label{eq:L0}
+\end{equation}
+The steady discrete adjoint matrix is
+\begin{equation}
+ A\equiv -L_0^T.
+ \label{eq:A_matrix}
+\end{equation}
+The implementation does not derive a second FV stencil for the adjoint.  It assembles the
+qualified forward values of $-L_0$ and transposes those values exactly on the same
+five-point CSR graph.
+
+The successful outer-escape rate vector is defined by
+\begin{equation}
+ \Phi_{\rm RE}^{\rm FV}(\Nvec)=\rRE^T\Nvec,
+\end{equation}
+where, for the first-order outer flux,
+\begin{equation}
+ (r_{\rm RE})_{ij}
+ =\begin{cases}
+ 0, & i<N_p,\\[2mm]
+ \displaystyle
+ \frac{2\pi p_{\max}^2\Delta\xi}{V_{N_pj}}
+ \left[A_p(p_{\max},\xi_j)\right]_+,
+ & i=N_p.
+ \end{cases}
+ \label{eq:rre}
+\end{equation}
+The lower absorbing boundary similarly defines the failure vector $\rF$.
+
+\subsection{Steady first-passage linear system}
+
+If the local forward state decays at long time, then the integrated successful escape from
+an arbitrary initial cell-content state is represented by
+\begin{equation}
+ \int_0^\infty \rRE^T e^{L_0\tau}\Nvec^0\,d\tau
+ =\Pvec^T\Nvec^0,
+\end{equation}
+where
+\begin{equation}
+ \boxed{
+ A\Pvec=\rRE,
+ \qquad A=-L_0^T.
+ }
+ \label{eq:discrete_rpf}
+\end{equation}
+Thus $P_k$ is the eventual successful-escape probability of a unit cell-content state in
+cell $k$.
+
+The exact discrete duality identity is
+\begin{equation}
+ \boxed{
+ \Pvec^T(-L_0)\Nvec=\rRE^T\Nvec
+ }
+ \label{eq:duality}
+\end{equation}
+for every test vector $\Nvec$ when Eq.~\eqref{eq:discrete_rpf} is solved exactly.
+
+With no other sinks or sources, the total boundary-loss identity is
+\begin{equation}
+ -L_0^T\bm 1=\rRE+\rF,
+ \label{eq:escape_identity}
+\end{equation}
+and the corresponding failure probability satisfies
+\begin{equation}
+ A\bm P_{\rm F}=\rF,
+ \qquad
+ \Pvec+\bm P_{\rm F}=\bm1.
+ \label{eq:partition}
+\end{equation}
+The expected bounds are therefore $0\le P_k\le1$.
+
+\subsection{GPU sparse-direct realization}
+
+The production reference path uses a fixed five-point CSR topology.  Matrix values and
+right-hand sides are assembled in FP64 on the GPU.  Warp-owned device arrays are passed
+directly to cuDSS for symbolic analysis, numerical factorization, and sparse-direct
+solution.  Symbolic analysis may be reused whenever the graph is unchanged and only
+physical coefficients vary between parameter cases.
+
+A normalized linear residual is evaluated from the actual GPU matrix and solution,
+\begin{equation}
+ \epsilon_{\rm solve}
+ =\frac{\|A\Pvec-\rRE\|_2}{\|\rRE\|_2},
+ \label{eq:linear_residual}
+\end{equation}
+with an absolute residual used when $\rRE=0$.
+
+\subsection{Reference-solver qualification requirements}
+\label{sec:fv_qualification}
+
+An FV field is admitted as a PINN label only after the reference calculation passes the
+relevant numerical checks.  At minimum:
+\begin{enumerate}[leftmargin=2.3em]
+ \item \textbf{Exact transpose:} the GPU values of $-L_0^T$ agree with an independently
+       formed transpose of the assembled forward matrix to floating-point accuracy.
+ \item \textbf{Successful-escape vector:} nonzero entries of $\rRE$ occur only in the
+       outer shell and the pitch mask agrees with $A_p(p_{\max},\xi_j)>0$.
+ \item \textbf{Sparse residual:} Eq.~\eqref{eq:linear_residual} is small relative to the
+       spatial discretization error.
+ \item \textbf{Discrete duality:} Eq.~\eqref{eq:duality} holds for deterministic and
+       random nonnegative test states.
+ \item \textbf{Probability partition:} the success/failure solutions satisfy
+       Eq.~\eqref{eq:partition} and material violations of $0\le P\le1$ are absent.
+ \item \textbf{Forward reconstruction:} direct propagation of selected initial states
+       reproduces $\Pvec^T\Nvec^0$ as the integrated successful escape.
+ \item \textbf{Grid and domain convergence:} $N_p$, $N_\xi$, $p_{\min}$, and $p_{\max}$
+       are refined independently until the RPF quantities of interest are stable.
+\end{enumerate}
+A converged cuDSS residual alone does not establish a converged FV label.
+
+\subsection{Wide momentum domains and conditioning of conservation diagnostics}
+\label{sec:wide_domain}
+
+A very broad interval $p_{\min}\ll1\ll p_{\max}$ is a difficult regime for a uniform
+momentum mesh.  At low momentum the pitch-scattering coefficient becomes rapidly varying
+and, in the suprathermal asymptotic regime, behaves schematically as
+\begin{equation}
+ \nu_D\sim p^{-3}.
+\end{equation}
+The discrete pitch-diffusion entries therefore scale roughly as
+\begin{equation}
+ \frac{\nu_D}{\Delta\xi^2}.
+\end{equation}
+Refining a uniform radial mesh moves the first cell center to smaller $p$, which can make
+individual matrix coefficients much larger even while the desired first-passage response
+remains bounded.
+
+This matters for diagnostics such as Eq.~\eqref{eq:escape_identity}.  In exact arithmetic,
+large interior contributions cancel and leave only boundary escape.  In floating-point
+arithmetic, evaluating $A\bm1$ may therefore be a strongly cancellation-conditioned
+operation.  A raw relative forward error can increase with refinement even when a
+componentwise backward error remains near machine precision.  Such behavior must be
+interpreted as a conditioning question, not automatically as either proof of correctness
+or proof of failure.
+
+Most importantly, good backward algebraic consistency does \emph{not} establish spatial
+resolution.  Before broad-domain FV fields are promoted to PINN labels, the momentum grid
+must resolve the low-$p$ region and the RPF itself must converge under grid/domain
+refinement.  If a uniform mesh cannot do this economically, a nonuniform radial grid is a
+numerical-model improvement to be qualified explicitly rather than hidden by relaxed
+algebraic tolerances.
+
+%===============================================================================
+\section{FV-assisted parametric PINN}
+\label{sec:pinn}
+
+The PINN represents the steady RPF continuously in $(p,\xi)$ and over the six-dimensional
+plasma parameter domain of Eq.~\eqref{eq:lambda}.  It is trained simultaneously against
+the continuum adjoint equation and qualified FV solutions.
+
+\subsection{Neural probability representation}
+
+Let $\mathcal N_{\thetaNN}(\bm z)$ be the scalar output of a fully connected network.  The
+current hard-output transform is
+\begin{equation}
+ \boxed{
+ P_{\thetaNN}(\bm z)
+ =\tanh\left[\widehat p^{\,2}\mathcal N_{\thetaNN}(\bm z)^2\right].
+ }
+ \label{eq:output_transform}
+\end{equation}
+It enforces
+\begin{equation}
+ P_{\thetaNN}(p_{\min},\xi;\lam)=0,
+ \qquad
+ 0\le P_{\thetaNN}<1.
+\end{equation}
+The successful $p_{\max}$ condition is imposed through the boundary loss instead of being
+hard-coded into the transform.
+
+\subsection{Steady adjoint residual used for training}
+
+For the present $C_A=0$ surrogate, Eq.~\eqref{eq:continuous_adjoint} becomes
+\begin{align}
+ \mathcal R_{\thetaNN}
+ ={}&-U_p\frac{\partial P_{\thetaNN}}{\partial p}
+ +(1-\xi^2)
+  \left(\frac{\bar E}{p}-\frac{\alpha\xi}{\gamma}\right)
+  \frac{\partial P_{\thetaNN}}{\partial\xi}
+ \nonumber\\
+ &-\frac{\nu_D}{2}\frac{\partial}{\partial\xi}
+ \left[(1-\xi^2)\frac{\partial P_{\thetaNN}}{\partial\xi}\right],
+ \label{eq:pinn_residual}
+\end{align}
+where
+\begin{equation}
+ U_p=A_p=-\bar E\xi-\alpha\gamma p(1-\xi^2)-C_F.
+\end{equation}
+Equivalently,
+\begin{equation}
+ \mathcal R_{\thetaNN}
+ =a_pP_p+a_\xi P_\xi+a_{\xi\xi}P_{\xi\xi},
+ \label{eq:expanded_residual}
+\end{equation}
+with
+\begin{align}
+ a_p&=-U_p,\\
+ a_\xi&=(1-\xi^2)\left(\frac{\bar E}{p}-\frac{\alpha\xi}{\gamma}\right)+\nu_D\xi,\\
+ a_{\xi\xi}&=-\frac12\nu_D(1-\xi^2).
+ \label{eq:pinn_coeffs}
+\end{align}
+
+For a fixed collocation set, all physical quantities in
+Eq.~\eqref{eq:pinn_coeffs} are independent of the network weights.  The implementation
+therefore precomputes the normalized-coordinate versions of
+$a_p$, $a_\xi$, and $a_{\xi\xi}$ once for each sampled PDE set.  Every optimizer step then
+repeats only the neural differentiation required for $P_p$, $P_\xi$, and $P_{\xi\xi}$.
+One first-derivative evaluation supplies both phase-space gradients and a directional JVP
+supplies the required second pitch derivative.
+
+\subsection{FV teacher data}
+
+Plasma states $\lam_k$ are sampled over the configured six-dimensional domain.  For each
+state, the standalone reference solver computes
+\begin{equation}
+ A(\lam_k)\Pvec_k^{\rm FV}=\rRE(\lam_k).
+ \label{eq:teacher}
+\end{equation}
+The FV solve remains completely outside JAX automatic differentiation.  The dataset stores
+parameter coordinates, FV phase-space coordinates, RPF fields, and qualification metadata.
+
+Complete plasma states are split into training and validation subsets.  A configurable
+subset of FV cells from each training state contributes to the supervised loss.  Held-out
+parameter states are never used to update the network and are evaluated on their complete
+FV grids after training.
+
+\subsection{Composite training objective}
+
+The loss is
+\begin{equation}
+ \boxed{
+ \mathcal L(\thetaNN)
+ =w_{\rm PDE}\mathcal L_{\rm PDE}
+ +w_{\rm BC}\mathcal L_{\rm BC}
+ +w_{\rm FV}\mathcal L_{\rm FV}.
+ }
+ \label{eq:total_loss}
+\end{equation}
+For fixed PDE collocation points,
+\begin{equation}
+ \mathcal L_{\rm PDE}
+ =\frac{1}{N_{\rm PDE}}
+  \sum_{i=1}^{N_{\rm PDE}}
+  \mathcal R_{\thetaNN}(\bm z_i^{\rm PDE})^2.
+\end{equation}
+For high-$p$ boundary points, let $m_i=1$ on the successful set of
+Eq.~\eqref{eq:success_set} and $m_i=0$ otherwise.  Then
+\begin{equation}
+ \mathcal L_{\rm BC}
+ =\frac{\sum_i m_i[P_{\thetaNN}(\bm z_i^{\rm BC})-1]^2}
+        {\max(\sum_i m_i,1)}.
+\end{equation}
+For supervised FV samples,
+\begin{equation}
+ \mathcal L_{\rm FV}
+ =\frac{1}{N_{\rm FV}}
+  \sum_{j=1}^{N_{\rm FV}}
+  [P_{\thetaNN}(\bm z_j^{\rm FV})-P_j^{\rm FV}]^2.
+\end{equation}
+The sample counts and the three weights are configuration parameters.
+
+\subsection{Whole-batch and chunked evaluation}
+
+The mathematical objective is full batch.  To tune GPU performance and memory, each loss
+sum may either be evaluated in one XLA call or accumulated internally in fixed-size chunks.
+Chunking does not create stochastic minibatches and does not change the collocation set.
+The configuration convention is
+\begin{equation}
+ \texttt{chunk}=0\quad\Longrightarrow\quad\text{evaluate the complete term at once}.
+\end{equation}
+A positive chunk size evaluates the same sum in deterministic chunks.  The choice is a
+hardware/performance parameter and should be benchmarked on the target GPU.
+
+%===============================================================================
+\section{Optimization protocol}
+\label{sec:optimization}
+
+The training hierarchy is
+\begin{equation}
+ \boxed{
+ \text{full-batch Adam warmup}
+ \;\longrightarrow\;
+ \text{blockwise full-batch SSBroyden refinement}.
+ }
+\end{equation}
+This follows the high-accuracy PINN strategy in which a first-order optimizer reaches a
+useful basin and a dense quasi-Newton method performs the final high-accuracy refinement
+\cite{Urban2025PINN}.
+
+\subsection{Adam stage}
+
+Adam operates on one fixed PDE, boundary, and FV training set for the configured number of
+steps.  The purpose of this stage is not necessarily to minimize each component of the
+composite objective to high accuracy; it supplies the starting point for the subsequent
+quasi-Newton phase.
+
+\subsection{SSBroyden blocks and line search}
+
+The default SSBroyden globalization is a strong-Wolfe backtracking line search.  The
+parameters are flattened to one vector and the dense inverse-Hessian approximation is
+maintained within each quasi-Newton solve.
+
+The total SSBroyden phase is divided into configurable blocks.  Each block is a new solve,
+so its inverse-Hessian approximation starts fresh.  Between blocks, PDE and outer-boundary
+collocation points may optionally be resampled while FV labels remain fixed.  Thus the
+training protocol can be written schematically as
+\begin{equation}
+ \text{SSB block}
+ \;\to\;
+ \left[\text{optional PDE/BC resample}\right]
+ \;\to\;
+ \left[\text{reset inverse Hessian}\right]
+ \;\to\;
+ \text{next SSB block}.
+\end{equation}
+
+This is a generalization-control mechanism rather than an arbitrary implementation detail.
+A very accurate quasi-Newton method can overfit a finite collocation set when that set is
+not sufficiently dense.  Resampling changes the discrete approximation to the continuum
+physics objective, while resetting the inverse-Hessian approximation avoids carrying
+secant information from the old sampled objective into the new one.  The resampling
+cadence and block length are therefore problem-dependent training parameters and may be
+disabled when a fixed collocation set is demonstrably sufficient.
+
+Machine-precision optimizer tolerances apply only to the sampled finite-dimensional loss.
+They are not evidence by themselves of continuum, FV-grid, or parametric-surrogate
+convergence.
+
+%===============================================================================
+\section{Reference-to-surrogate workflow}
+\label{sec:workflow}
+
+The intended workflow is summarized in Table~\ref{tab:workflow}.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{>{\raggedright\arraybackslash}p{0.12\textwidth}
+                >{\raggedright\arraybackslash}p{0.25\textwidth}
+                >{\raggedright\arraybackslash}p{0.52\textwidth}}
+\toprule
+\textbf{Stage} & \textbf{Object} & \textbf{Requirement}\\
+\midrule
+1 & Shared physics coefficients & FV and JAX/PINN coefficient layers agree, including
+continuous mean-charge mapping, quasineutrality, screening, and synchrotron strength.\\
+2 & FV operator & Assemble the conservative forward cell-content generator with the
+selected boundaries and physical coefficients.\\
+3 & Discrete adjoint & Form $A=-L_0^T$ by exact algebraic transpose and construct the
+successful-escape vector from the same outer flux.\\
+4 & FV reference solution & Solve $A\Pvec=\rRE$ and pass algebraic, probability, grid, and
+domain qualification.\\
+5 & Dataset & Store qualified RPF fields for training states and disjoint complete plasma
+states for validation.\\
+6 & PINN & Train the continuum adjoint residual, successful outer BC, and FV supervised
+loss with Adam followed by SSBroyden.\\
+7 & Surrogate qualification & Compare complete held-out FV fields, refine collocation and
+FV label sets, and increase network capacity when representation error is limiting.\\
+\bottomrule
+\end{tabular}
+\caption{Reference-to-surrogate hierarchy.  No stage downstream of the FV reference can
+repair an unqualified reference discretization.}
+\label{tab:workflow}
+\end{table}
+
+The practical separation of responsibilities is therefore:
+\begin{center}
+\fbox{\parbox{0.90\textwidth}{
+\textbf{FV solver:} defines and qualifies the discrete reference RPF.\\[1mm]
+\textbf{PINN:} approximates the qualified RPF family continuously in phase space and parameters.
+}}
+\end{center}
+
+%===============================================================================
+\section{Surrogate validation and promotion criteria}
+\label{sec:surrogate_qualification}
+
+Training loss alone is not a promotion criterion.  The minimum validation hierarchy is:
+\begin{enumerate}[leftmargin=2.3em]
+ \item \textbf{Coefficient parity.}  Compare the FV and JAX coefficient layers at
+       representative points spanning the requested parameter domain.
+ \item \textbf{FV reference convergence.}  Demonstrate RPF stability under $N_p$, $N_\xi$,
+       $p_{\min}$, and $p_{\max}$ refinement before using a family of fields as labels.
+ \item \textbf{Held-out plasma states.}  Exclude complete parameter states from training
+       and compare the PINN with the complete FV field using at least relative $L^2$ and
+       maximum absolute error.
+ \item \textbf{Collocation/data refinement.}  Increase PDE points, boundary points, number
+       of FV parameter cases, and FV samples per case until held-out quantities stabilize.
+ \item \textbf{Optimization refinement.}  Vary Adam length, SSBroyden block length,
+       resampling cadence, and optimizer tolerances as numerical-training convergence axes.
+ \item \textbf{Network-capacity refinement.}  Increase width/depth when the FV error
+       plateaus while PDE and boundary residuals are already small.
+\end{enumerate}
+
+A characteristic capacity-limited regime is one in which
+\begin{equation}
+ \mathcal L_{\rm PDE},\mathcal L_{\rm BC}\ll\mathcal L_{\rm FV},
+\end{equation}
+while held-out FV error no longer improves materially.  In that regime, further reduction
+of the collocation residual is not the primary task; representation capacity, label
+coverage, or parameter-domain complexity should be examined.
+
+%===============================================================================
+\section{Configuration quantities that belong to this task}
+\label{sec:config}
+
+The task-level configuration should expose, rather than hard-code, at least the following:
+
+\begin{table}[H]
+\centering
+\small
+\renewcommand{\arraystretch}{1.22}
+\begin{tabular}{>{\raggedright\arraybackslash}p{0.24\textwidth}
+                >{\raggedright\arraybackslash}p{0.66\textwidth}}
+\toprule
+\textbf{Category} & \textbf{User-configurable quantities}\\
+\midrule
+FV reference & $N_p$, $N_\xi$, $p_{\min}$, $p_{\max}$, magnetic field, energy-diffusion
+switch, number of training and validation plasma states.\\
+Parameter domain & lower/upper bounds and linear/log sampling transforms for $\Ecfg$, $T_e$,
+$n_D$, $n_I$, together with bounds for $\overline Z_D$ and $\overline Z_I$.\\
+PINN architecture & width, depth, initialization seed.\\
+Training sets & $N_{\rm PDE}$, $N_{\rm BC}$, FV samples per training state, sampling seed,
+interior-boundary exclusion.\\
+Loss evaluation & PDE, BC, FV, and validation chunk sizes, including zero for whole-batch
+evaluation.\\
+Adam & number of steps, compiled block size, learning rate.\\
+SSBroyden & number of blocks, iterations per block, resampling cadence, line-search choice,
+relative and absolute tolerances.\\
+Loss weights & $w_{\rm PDE}$, $w_{\rm BC}$, $w_{\rm FV}$ and any documented residual scale.\\
+\bottomrule
+\end{tabular}
+\caption{Configuration contract for the focused RPF/FV/PINN task.}
+\end{table}
+
+The physical training domain and the training protocol are deliberately separate.  A
+change in optimizer settings does not redefine the RPF, while expanding the physical
+parameter or momentum domain can require new FV grid/domain qualification before new
+labels are accepted.
+
+%===============================================================================
+\section{Summary of the task-level scientific contract}
+
+The focused contract can be reduced to five statements:
+\begin{enumerate}[leftmargin=2.3em]
+ \item The RPF is a first-passage probability of the \emph{local} tagged-electron
+       generator, with inner radial loss interpreted as failure and positive outer radial
+       outflow interpreted as successful runaway.
+ \item The authoritative numerical RPF is the solution of
+       $(-L_0^T)\Pvec=\rRE$, where $L_0$ is the conservative FV forward cell-content
+       generator and the transpose is algebraic and exact on the assembled graph.
+ \item The FV reference must satisfy algebraic, probability, grid, and domain
+       qualification before its fields are used as neural labels.
+ \item The PINN solves the same steady adjoint physics continuously and is anchored by FV
+       supervision.  It does not differentiate through the FV solver and does not replace
+       the reference discretization.
+ \item Adam--SSBroyden training, collocation resampling, Hessian resets, chunking, and
+       network capacity are numerical training choices whose adequacy is established by
+       held-out FV validation and refinement, not by training loss alone.
+\end{enumerate}
+
+%===============================================================================
+\footnotesize
+\begin{thebibliography}{99}
+
+\bibitem{BraamsKarney1989}
+B.~J. Braams and C.~F.~F. Karney,
+``Conductivity of a relativistic plasma,''
+\emph{Phys. Fluids B} \textbf{1}, 1355 (1989).
+
+\bibitem{Hesslow2018Collision}
+L.~Hesslow, O.~Embr\'eus, M.~Hoppe, T.~C. DuBois, G.~Papp,
+M.~Rahm, and T.~F{\"u}l{\"o}p,
+``Generalized collision operator for fast electrons interacting with partially ionized impurities,''
+\emph{J. Plasma Phys.} \textbf{84}, 905840605 (2018).
+
+\bibitem{Andersson2001}
+F.~Andersson, P.~Helander, and L.-G.~Eriksson,
+``Damping of relativistic electron beams by synchrotron radiation,''
+\emph{Phys. Plasmas} \textbf{8}, 5221 (2001).
+
+\bibitem{McDevitt2025Dynamics}
+C.~J. McDevitt, J.~S. Arnaud, and X.-Z. Tang,
+``A physics-constrained deep learning treatment of runaway electron dynamics,''
+\emph{Phys. Plasmas} \textbf{32}, 042503 (2025).
+
+\bibitem{Urban2025PINN}
+J.~F. Urb{\'a}n, P.~Stefanou, and J.~A. Pons,
+``Unveiling the optimization process of physics informed neural networks: How accurate and competitive can PINNs be?,''
+\emph{J. Comput. Phys.} \textbf{523}, 113656 (2025).
+
+\end{thebibliography}
+
+\end{document}

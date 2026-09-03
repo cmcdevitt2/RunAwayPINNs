@@ -9,11 +9,14 @@ steady 0D--2P relativistic runaway-electron first-passage problem.
 - `pinn_training.py`: JAX PINN trainer using FV-generated labels.
 - `adjoint_fv_solver.toml`: small direct-solver example case.
 - `pinn_training.toml`: training configuration and parameter domain.
+- `rpf_fv_pinn_scientific_reference_v1.tex`: scientific and numerical reference.
 - `docs/HIPERGATOR.md`: required Hipergator GPU batch-job workflow.
 
 The solver is a prescribed-parameter, spatially homogeneous test-particle model;
 it is not a self-consistent plasma evolution code. Preserve the physical and
 numerical contract represented by the source and configuration files.
+The LaTeX reference gives the detailed adjoint PDE, FV discretization, and PINN
+qualification requirements.
 
 ## Software model
 

@@ -22,7 +22,8 @@ staging because this directory is nested inside a larger public repository.
 
 Classify work before acting:
 
-- Locate or trace one symbol: use a fast investigator and request path/line output.
+- Locate or trace one symbol: use `cavecrew-investigator` with a fast model and
+  request path/line output.
 - Rename or edit one or two obvious files: use a bounded builder or make the
   surgical edit directly.
 - Unknown numerical failure: investigate first; rank hypotheses by evidence.
