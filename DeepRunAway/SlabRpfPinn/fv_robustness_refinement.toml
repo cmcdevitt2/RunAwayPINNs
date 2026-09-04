@@ -1,0 +1,82 @@
+# B200 follow-up after the first-pass campaign exposed radial-grid sensitivity.
+# It preserves the first campaign output and raises the reference to the
+# intended PINN FV grid, Np=1024 and Nxi=512.
+
+[solver]
+solver_script = "adjoint_fv_solver.py"
+device = "cuda:0"
+B_T = 5.3
+energy_diffusion = false
+
+[domain]
+e_parallel_min = 1.0
+e_parallel_max = 1000.0
+e_parallel_sampling = "log"
+te_min_ev = 1.0
+te_max_ev = 100.0
+te_sampling = "log"
+nD_min_m3 = 1.0e20
+nD_max_m3 = 1.0e22
+nD_sampling = "log"
+nImp_min_m3 = 1.0e16
+nImp_max_m3 = 1.0e22
+nImp_sampling = "log"
+zDavg_min = 0.01
+zDavg_max = 1.0
+zImpavg_min = 0.01
+zImpavg_max = 10.0
+impurity_name = "Ne"
+impurity_Z = 10
+
+[sampling]
+seed = 1234
+n_sobol = 16
+include_center = true
+include_axis_extrema = true
+include_corners = false
+
+[[panel]]
+name = "reference"
+Np = 1024
+Nxi = 512
+pmin = 0.001
+pmax = 50.0
+
+[[panel]]
+name = "radial_coarse"
+Np = 512
+Nxi = 512
+pmin = 0.001
+pmax = 50.0
+
+[[panel]]
+name = "pitch_coarse"
+Np = 1024
+Nxi = 256
+pmin = 0.001
+pmax = 50.0
+
+[[panel]]
+name = "lower_domain"
+Np = 1024
+Nxi = 512
+pmin = 0.0005
+pmax = 50.0
+
+[[panel]]
+name = "upper_domain"
+Np = 2048
+Nxi = 512
+pmin = 0.001
+pmax = 100.0
+
+[comparison]
+reference_panel = "reference"
+Np = 512
+Nxi = 256
+pmin = 0.001
+pmax = 50.0
+
+[output]
+directory = "outputs/fv_robustness/refinement_1024x512"
+save_fields = false

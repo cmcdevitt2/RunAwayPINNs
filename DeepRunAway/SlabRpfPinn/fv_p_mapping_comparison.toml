@@ -1,0 +1,128 @@
+# Momentum-grid comparison for the high-electric-field RPF regime. One batch
+# job cycles over all explicit cases and panels. Angular grid is uniform theta.
+
+[solver]
+solver_script = "adjoint_fv_solver.py"
+device = "cuda:0"
+B_T = 5.3
+energy_diffusion = false
+
+[domain]
+e_parallel_min = 1.0
+e_parallel_max = 1000.0
+e_parallel_sampling = "log"
+te_min_ev = 1.0
+te_max_ev = 100.0
+te_sampling = "log"
+nD_min_m3 = 1.0e20
+nD_max_m3 = 1.0e22
+nD_sampling = "log"
+nImp_min_m3 = 1.0e16
+nImp_max_m3 = 1.0e22
+nImp_sampling = "log"
+zDavg_min = 0.01
+zDavg_max = 1.0
+zImpavg_min = 0.01
+zImpavg_max = 10.0
+impurity_name = "Ne"
+impurity_Z = 10
+
+[sampling]
+n_sobol = 0
+include_center = false
+include_axis_extrema = false
+include_corners = false
+
+[[case]]
+label = "moderate_drive"
+E_over_Ec = 100.0
+te_eV = 10.0
+nD_m3 = 1.0e21
+nImp_m3 = 1.0e19
+zDavg = 0.505
+zImpavg = 5.005
+
+[[case]]
+label = "strong_drive"
+E_over_Ec = 1000.0
+te_eV = 10.0
+nD_m3 = 1.0e21
+nImp_m3 = 1.0e19
+zDavg = 0.505
+zImpavg = 5.005
+
+[[case]]
+label = "strong_drive_cold_dense"
+E_over_Ec = 1000.0
+te_eV = 1.0
+nD_m3 = 1.0e22
+nImp_m3 = 1.0e22
+zDavg = 1.0
+zImpavg = 10.0
+
+[[case]]
+label = "strong_drive_hot_dilute"
+E_over_Ec = 1000.0
+te_eV = 100.0
+nD_m3 = 1.0e20
+nImp_m3 = 1.0e16
+zDavg = 0.01
+zImpavg = 0.01
+
+[[panel]]
+name = "uniform_p_4096"
+Np = 4096
+Nxi = 1024
+pmin = 0.000625611920328
+pmax = 10.7382941013
+p_mapping = "uniform"
+xi_mapping = "theta"
+
+[[panel]]
+name = "log_p_4096"
+Np = 4096
+Nxi = 1024
+pmin = 0.000625611920328
+pmax = 10.7382941013
+p_mapping = "log"
+xi_mapping = "theta"
+
+[[panel]]
+name = "exponential_p_k4_4096"
+Np = 4096
+Nxi = 1024
+pmin = 0.000625611920328
+pmax = 10.7382941013
+p_mapping = "exponential"
+p_mapping_kappa = 4.0
+xi_mapping = "theta"
+
+[[panel]]
+name = "exponential_p_k8_4096"
+Np = 4096
+Nxi = 1024
+pmin = 0.000625611920328
+pmax = 10.7382941013
+p_mapping = "exponential"
+p_mapping_kappa = 8.0
+xi_mapping = "theta"
+
+[[panel]]
+name = "uniform_p_8192_reference"
+Np = 8192
+Nxi = 1024
+pmin = 0.000625611920328
+pmax = 10.7382941013
+p_mapping = "uniform"
+xi_mapping = "theta"
+
+[comparison]
+reference_panel = "uniform_p_8192_reference"
+Np = 512
+Nxi = 256
+pmin = 0.01
+pmax = 10.0
+
+[output]
+directory = "outputs/fv_p_mapping_comparison"
+save_fields = false

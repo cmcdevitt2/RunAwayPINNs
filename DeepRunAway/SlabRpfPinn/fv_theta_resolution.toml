@@ -1,0 +1,117 @@
+# Angular-grid resolution study. One batch job cycles over all cases and
+# panels. Momentum is uniform in p for this focused test.
+
+[solver]
+solver_script = "adjoint_fv_solver.py"
+device = "cuda:0"
+B_T = 5.3
+energy_diffusion = false
+
+[domain]
+e_parallel_min = 1.0
+e_parallel_max = 1000.0
+e_parallel_sampling = "log"
+te_min_ev = 1.0
+te_max_ev = 100.0
+te_sampling = "log"
+nD_min_m3 = 1.0e20
+nD_max_m3 = 1.0e22
+nD_sampling = "log"
+nImp_min_m3 = 1.0e16
+nImp_max_m3 = 1.0e22
+nImp_sampling = "log"
+zDavg_min = 0.01
+zDavg_max = 1.0
+zImpavg_min = 0.01
+zImpavg_max = 10.0
+impurity_name = "Ne"
+impurity_Z = 10
+
+[sampling]
+n_sobol = 0
+include_center = false
+include_axis_extrema = false
+include_corners = false
+
+[[case]]
+label = "center"
+E_over_Ec = 31.6227766
+te_eV = 10.0
+nD_m3 = 1.0e21
+nImp_m3 = 1.0e19
+zDavg = 0.505
+zImpavg = 5.005
+
+[[case]]
+label = "weak_drive"
+E_over_Ec = 1.0
+te_eV = 10.0
+nD_m3 = 1.0e21
+nImp_m3 = 1.0e19
+zDavg = 0.505
+zImpavg = 5.005
+
+[[case]]
+label = "strong_drive"
+E_over_Ec = 1000.0
+te_eV = 10.0
+nD_m3 = 1.0e21
+nImp_m3 = 1.0e19
+zDavg = 0.505
+zImpavg = 5.005
+
+[[case]]
+label = "cold_dense"
+E_over_Ec = 10.0
+te_eV = 1.0
+nD_m3 = 1.0e22
+nImp_m3 = 1.0e22
+zDavg = 1.0
+zImpavg = 10.0
+
+[[panel]]
+name = "uniform_xi_1024"
+Np = 4096
+Nxi = 1024
+pmin = 0.000625611920328
+pmax = 10.7382941013
+p_mapping = "uniform"
+xi_mapping = "uniform"
+
+[[panel]]
+name = "theta_512"
+Np = 4096
+Nxi = 512
+pmin = 0.000625611920328
+pmax = 10.7382941013
+p_mapping = "uniform"
+xi_mapping = "theta"
+
+[[panel]]
+name = "theta_1024"
+Np = 4096
+Nxi = 1024
+pmin = 0.000625611920328
+pmax = 10.7382941013
+p_mapping = "uniform"
+xi_mapping = "theta"
+
+[[panel]]
+name = "theta_2048"
+Np = 4096
+Nxi = 2048
+pmin = 0.000625611920328
+pmax = 10.7382941013
+p_mapping = "uniform"
+xi_mapping = "theta"
+
+[comparison]
+reference_panel = "theta_2048"
+Np = 512
+Nxi = 256
+pmin = 0.01
+pmax = 10.0
+
+[output]
+directory = "outputs/fv_theta_resolution"
+save_fields = false

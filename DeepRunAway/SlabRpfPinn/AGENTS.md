@@ -23,8 +23,9 @@ cuDSS usage, and reproducibility as first-class requirements.
 
 ## Context and token discipline
 
-- Read README and relevant config/code first; read large data, generated output,
-  and reference documents only when the task requires them.
+- Read README, then all documentation in `docs/` when that directory exists,
+  followed by the relevant config/code; read large data, generated output, and
+  reference documents only when the task requires them.
 - Search symbols and call sites before opening whole files.
 - Keep delegated messages narrow and ask for path/line findings or a small patch,
   not an essay.

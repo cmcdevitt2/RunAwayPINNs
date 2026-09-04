@@ -4,6 +4,11 @@ Run both programs through Slurm batch jobs on Hipergator. Login nodes are for
 editing, small syntax checks, and job submission only; they are not a valid
 place for Warp/cuDSS or JAX GPU production runs.
 
+The production target is an NVIDIA B200 GPU. Request the dedicated
+`hpg-b200` partition and a typed `gpu:b200:1` GRES in every batch script
+(subject to the project's Slurm account/QOS access); retain the `b200`
+constraint as an additional allocation check when adapting the templates below.
+
 ## Prepare environment
 
 From the renamed `SlabRpfPinn` directory, use the neighboring environment:
@@ -33,9 +38,10 @@ Save a site-specific batch script outside Git or adapt this template:
 ```bash
 #!/usr/bin/env bash
 #SBATCH --job-name=slab-rpf-fv
-#SBATCH --partition=gpu
-#SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=8
+#SBATCH --partition=hpg-b200
+#SBATCH --constraint=b200
+#SBATCH --gres=gpu:b200:1
+#SBATCH --cpus-per-task=28
 #SBATCH --mem=64G
 #SBATCH --time=02:00:00
 #SBATCH --output=logs/%x-%j.out
@@ -77,6 +83,37 @@ sacct -j <JOBID> --format=JobID,State,ExitCode,Elapsed,MaxRSS
 Use a separate output path per case. Do not let concurrent jobs overwrite the
 same `.npz` or plot files.
 
+## FV robustness campaign
+
+Before generating PINN labels, run the committed B200 campaign script. It
+samples complete plasma states across the configured PINN domain, repeats them
+on the configured grid/domain panels, and writes a machine-readable report of
+per-case solver diagnostics plus common-grid RPF differences. It deliberately
+does not turn a chosen numerical threshold into an automatic label-promotion
+decision.
+
+```bash
+source ../.venv/bin/activate
+python fv_robustness_campaign.py --config fv_robustness_campaign.toml --dry-run
+mkdir -p logs outputs/fv_robustness
+sbatch fv_robustness_b200.sbatch
+```
+
+The script requests `hpg-b200`, `gpu:b200:1`, and `--constraint=b200`, then
+rejects an allocation whose GPU name is not B200. Use `sacct` after completion and retain
+`outputs/fv_robustness/fv_robustness_summary.json`, the TOML, and Slurm logs.
+Review the failed-case list, residual/identity diagnostics, probability bounds,
+and RPF differences from radial, pitch, lower-domain, and upper-domain panels
+before increasing sampling coverage or accepting FV labels.
+
+The higher-resolution follow-up retains the first report in a distinct output
+directory and can be submitted with:
+
+```bash
+mkdir -p logs outputs/fv_robustness/refinement_1024x512
+sbatch fv_robustness_b200.sbatch fv_robustness_refinement.toml
+```
+
 ## PINN training job
 
 PINN label generation can solve many FV cases and may require substantial GPU
@@ -85,8 +122,9 @@ memory, host memory, and wall time. Submit it as its own job:
 ```bash
 #!/usr/bin/env bash
 #SBATCH --job-name=slab-rpf-pinn
-#SBATCH --partition=gpu
-#SBATCH --gres=gpu:1
+#SBATCH --partition=hpg-b200
+#SBATCH --constraint=b200
+#SBATCH --gres=gpu:b200:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=128G
 #SBATCH --time=24:00:00

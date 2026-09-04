@@ -83,8 +83,8 @@ This task concerns the \emph{steady} first-passage adjoint.  The following piece
 scope:
 \begin{itemize}[leftmargin=2em]
  \item a spatially homogeneous, gyrotropic $(p,\xi)$ local electron generator;
- \item electric acceleration, relativistic small-angle collisions, synchrotron reaction,
-       and the associated open radial boundaries;
+ \item electric acceleration, asymptotically matched small-angle test-particle collisions,
+       synchrotron reaction, partial screening, and the associated open radial boundaries;
  \item a conservative FV forward generator $L_0$ and its exact algebraic transpose;
  \item the steady discrete RPF solve $(-L_0^T)\Pvec=\rRE$;
  \item a parametric neural approximation $P_{\thetaNN}(p,\xi;\lam)$ trained with both the
@@ -120,9 +120,12 @@ Use the dimensionless relativistic momentum
 \end{equation}
 The represented RPF domain is
 \begin{equation}
- p_{\min}\le p\le p_{\max},\qquad -1\le\xi\le1,
+p_{\min}\le p\le p_{\max},\qquad -1\le\xi\le1,
 \end{equation}
-with $p_{\min}>0$ for the present suprathermal first-passage problem.
+with $p_{\min}\ge0$.  The FV formulation admits the coordinate origin: its
+first cell center remains strictly positive, coordinate-singular collision
+coefficients are not evaluated on the $p=0$ face, and the radial face measure
+vanishes there.
 
 The local forward kinetic equation, with branching sources removed, is written in
 conservative form as
@@ -152,9 +155,10 @@ and
 \end{align}
 Here $C_F$ is collisional radial drag, $C_A$ is radial energy diffusion, $\nu_D$ is the
 pitch-angle deflection frequency, and $\alpha$ is the normalized synchrotron strength.
-The coefficient construction is shared with the qualified kinetic model and may include
-the selected finite-temperature relativistic base, energy-dependent Coulomb logarithms,
-and partial-screening corrections.  No separate adjoint collision model is introduced.
+The coefficient construction uses only the asymptotically matched test-particle collision
+operator, with energy-dependent Coulomb logarithms and partial-screening corrections.
+Partial screening is always retained.
+No separate adjoint collision model is introduced.
 
 The parametric PINN configuration supplies the electric field as
 \begin{equation}
@@ -350,18 +354,46 @@ Integrating Eq.~\eqref{eq:forward_local} over a cell gives
 Each interior face flux is formed once and enters the two neighboring cells with opposite
 signs, so interior conservation is algebraic.
 
-Radial and pitch drifts use first-order upwinding; diffusion uses centered differences.
+Both drift--diffusion fluxes use Chang--Cooper exponential fitting.  For a face in a
+coordinate $q$ with drift $A_q$, diffusion coefficient $D_q$, and spacing $\Delta q$, define
+\begin{equation}
+ w_q=\frac{A_q\Delta q}{D_q},\qquad
+ \delta(w_q)=\frac{1}{w_q}-\frac{1}{e^{w_q}-1},\qquad
+ \delta(0)=\frac12,
+ \label{eq:cc_weight}
+\end{equation}
+and the face value
+\begin{equation}
+ f^{\rm CC}_{q+1/2}
+ =(1-\delta(w_q))f_q+\delta(w_q)f_{q+1}.
+ \label{eq:cc_face_value}
+\end{equation}
+This orientation matches the flux convention $J_q=A_qf-D_q\partial_qf$ and preserves
+a locally constant-coefficient zero-flux exponential.  When $D_q\to0$, the continuous
+Chang--Cooper limit supplies the corresponding donor-side value.
+
 For example, at an interior radial face,
 \begin{equation}
  F^p_{i+1/2,j}
  =2\pi p_{i+1/2}^2\Delta\xi
  \left[
-  A^p_{i+1/2,j}f^{p,\mathrm{up}}_{i+1/2,j}
+  A^p_{i+1/2,j}f^{p,\mathrm{CC}}_{i+1/2,j}
   -C_{A,i+1/2}\frac{f_{i+1,j}-f_{ij}}{\Delta p}
  \right].
  \label{eq:radial_flux}
 \end{equation}
-The pitch-face flux has the analogous upwind/centered structure with $A_\xi$ and $D_\xi$.
+The pitch-face flux is
+\begin{equation}
+ F^\xi_{i,j+1/2}
+ =V^p_i
+  \left[
+   A^\xi_{i,j+1/2}f^{\rm CC}_{i,j+1/2}
+   -D_{\xi,i,j+1/2}\frac{f_{i,j+1}-f_{ij}}{\Delta\xi}
+  \right],
+ \qquad
+ V^p_i=\frac{2\pi}{3}\left(p_{i+1/2}^3-p_{i-1/2}^3\right).
+ \label{eq:pitch_flux}
+\end{equation}
 
 At $p=p_{\max}$ the open outer flux is
 \begin{equation}
@@ -396,7 +428,7 @@ The successful outer-escape rate vector is defined by
 \begin{equation}
  \Phi_{\rm RE}^{\rm FV}(\Nvec)=\rRE^T\Nvec,
 \end{equation}
-where, for the first-order outer flux,
+where, for the zero-inflow outer flux in the present $C_A=0$ model,
 \begin{equation}
  (r_{\rm RE})_{ij}
  =\begin{cases}
@@ -845,11 +877,6 @@ The focused contract can be reduced to five statements:
 %===============================================================================
 \footnotesize
 \begin{thebibliography}{99}
-
-\bibitem{BraamsKarney1989}
-B.~J. Braams and C.~F.~F. Karney,
-``Conductivity of a relativistic plasma,''
-\emph{Phys. Fluids B} \textbf{1}, 1355 (1989).
 
 \bibitem{Hesslow2018Collision}
 L.~Hesslow, O.~Embr\'eus, M.~Hoppe, T.~C. DuBois, G.~Papp,

@@ -186,6 +186,9 @@ class SolverConfig:
     Nxi: int = 256
     pmin: float = 0.2
     pmax: float = 5.0
+    p_mapping: str = "uniform"
+    p_mapping_kappa: float = 4.0
+    xi_mapping: str = "uniform"
 
     # Configurable terminal response centered at p_RE.  "heaviside" uses the
     # exact discontinuous FV projection.  "smoothed_heaviside" uses a tanh
@@ -273,6 +276,10 @@ class Grid:
     dxi: float
     radial_volume: np.ndarray
     cell_volume: np.ndarray
+    p_cell_widths: np.ndarray
+    xi_cell_widths: np.ndarray
+    p_face_spacing: np.ndarray
+    xi_face_spacing: np.ndarray
 
     @property
     def Np(self) -> int:
@@ -349,10 +356,19 @@ def validate_rpf_config(cfg: SolverConfig) -> None:
         raise ValueError("plasma.B_T must be non-negative")
     if cfg.Np < 2 or cfg.Nxi < 2:
         raise ValueError("adjoint RPF requires grid.Np >= 2 and grid.Nxi >= 2")
-    if cfg.pmin <= 0.0:
-        raise ValueError("first-passage RPF requires shifted absorbing grid.pmin > 0")
+    if cfg.pmin < 0.0:
+        raise ValueError("first-passage RPF requires grid.pmin >= 0")
     if cfg.pmax <= cfg.pmin:
         raise ValueError("grid.pmax must be greater than grid.pmin")
+    p_mapping = str(cfg.p_mapping).strip().lower()
+    if p_mapping not in ("uniform", "log", "exponential"):
+        raise ValueError("grid.p_mapping must be 'uniform', 'log', or 'exponential'")
+    if p_mapping == "log" and cfg.pmin <= 0.0:
+        raise ValueError("grid.p_mapping='log' requires grid.pmin > 0")
+    if not math.isfinite(cfg.p_mapping_kappa) or cfg.p_mapping_kappa <= 0.0:
+        raise ValueError("grid.p_mapping_kappa must be finite and positive")
+    if str(cfg.xi_mapping).strip().lower() not in ("uniform", "theta"):
+        raise ValueError("grid.xi_mapping must be 'uniform' or 'theta'")
 
     if cfg.solve_mode == "steady_and_time":
         time_scalars = {
@@ -474,15 +490,51 @@ def derive_physics(cfg: SolverConfig) -> DerivedPhysics:
 
 
 def build_grid(cfg: SolverConfig) -> Grid:
-    dp = (cfg.pmax - cfg.pmin) / cfg.Np
+    mapping = str(cfg.p_mapping).strip().lower()
+    if mapping == "uniform":
+        pf = np.linspace(cfg.pmin, cfg.pmax, cfg.Np + 1, dtype=np.float64)
+    elif mapping == "log":
+        s = np.linspace(0.0, 1.0, cfg.Np + 1, dtype=np.float64)
+        pf = np.exp(np.log(cfg.pmin) + s * (np.log(cfg.pmax) - np.log(cfg.pmin)))
+    elif mapping == "exponential":
+        kappa = float(cfg.p_mapping_kappa)
+        s = np.linspace(0.0, 1.0, cfg.Np + 1, dtype=np.float64)
+        pf = cfg.pmin + (cfg.pmax-cfg.pmin)*np.expm1(kappa*s)/np.expm1(kappa)
+    else:
+        raise ValueError(f"unsupported p_mapping {cfg.p_mapping!r}")
+    p_widths = np.diff(pf)
+    pc = 0.5*(pf[:-1] + pf[1:])
+    dp = float(np.mean(p_widths))
+    xi_mapping = str(cfg.xi_mapping).strip().lower()
     dxi = 2.0 / cfg.Nxi
-    pf = np.linspace(cfg.pmin, cfg.pmax, cfg.Np + 1, dtype=np.float64)
-    pc = cfg.pmin + (np.arange(cfg.Np, dtype=np.float64) + 0.5) * dp
-    xf = np.linspace(-1.0, 1.0, cfg.Nxi + 1, dtype=np.float64)
-    xc = -1.0 + (np.arange(cfg.Nxi, dtype=np.float64) + 0.5) * dxi
+    if xi_mapping == "uniform":
+        xf = np.linspace(-1.0, 1.0, cfg.Nxi + 1, dtype=np.float64)
+        xc = -1.0 + (np.arange(cfg.Nxi, dtype=np.float64) + 0.5) * dxi
+    elif xi_mapping == "theta":
+        theta_faces = np.linspace(0.0, math.pi, cfg.Nxi + 1, dtype=np.float64)
+        theta_centers = 0.5 * (theta_faces[:-1] + theta_faces[1:])
+        xf = -np.cos(theta_faces)
+        xc = -np.cos(theta_centers)
+    else:
+        raise ValueError(f"unsupported xi_mapping {cfg.xi_mapping!r}")
+    xi_widths = np.diff(xf)
+    p_spacing = np.empty(cfg.Np + 1, dtype=np.float64)
+    p_spacing[0] = pc[0] - pf[0]
+    p_spacing[1:-1] = pc[1:] - pc[:-1]
+    p_spacing[-1] = pf[-1] - pc[-1]
+    if xi_mapping == "uniform":
+        xi_spacing = np.full(cfg.Nxi + 1, dxi, dtype=np.float64)
+    else:
+        xi_spacing = np.empty(cfg.Nxi + 1, dtype=np.float64)
+        xi_spacing[0] = xc[0] - xf[0]
+        xi_spacing[1:-1] = xc[1:] - xc[:-1]
+        xi_spacing[-1] = xf[-1] - xc[-1]
     rv = (2.0 * math.pi / 3.0) * (pf[1:]**3 - pf[:-1]**3)
-    cv = np.repeat(rv, cfg.Nxi) * dxi
-    return Grid(pf, pc, xf, xc, dp, dxi, rv, cv)
+    cv = np.repeat(rv, cfg.Nxi) * np.tile(xi_widths, cfg.Np)
+    return Grid(
+        pf, pc, xf, xc, dp, dxi, rv, cv,
+        p_widths, xi_widths, p_spacing, xi_spacing,
+    )
 
 
 # =============================================================================
@@ -711,6 +763,51 @@ def _build_local_csr_row_ptr_host(grid: Grid) -> tuple[np.ndarray, int]:
 
 if wp is not None:
 
+    @wp.func
+    def chang_cooper_delta(w: wp.float64) -> wp.float64:
+        """Stable Chang--Cooper exponential-fitting weight."""
+        aw = wp.abs(w)
+        if aw < wp.float64(1.0e-4):
+            w2 = w*w
+            return (
+                wp.float64(0.5) - w/wp.float64(12.0)
+                + w*w2/wp.float64(720.0)
+                - w*w2*w2/wp.float64(30240.0)
+            )
+        if w > wp.float64(50.0):
+            return wp.float64(1.0)/w
+        if w < wp.float64(-50.0):
+            return wp.float64(1.0) + wp.float64(1.0)/w
+        return wp.float64(1.0)/w - wp.float64(1.0)/(wp.exp(w)-wp.float64(1.0))
+
+
+    @wp.func
+    def chang_cooper_left_coefficient(
+        A: wp.float64, D: wp.float64, dq: wp.float64
+    ) -> wp.float64:
+        # J = A*((1-delta)*f_left + delta*f_right)
+        #     - D*(f_right-f_left)/dq.
+        if D > wp.float64(0.0):
+            delta = chang_cooper_delta(A*dq/D)
+            return A*(wp.float64(1.0)-delta) + D/dq
+        # Continuous D -> 0 Chang--Cooper limit.
+        if A >= wp.float64(0.0):
+            return A
+        return wp.float64(0.0)
+
+
+    @wp.func
+    def chang_cooper_right_coefficient(
+        A: wp.float64, D: wp.float64, dq: wp.float64
+    ) -> wp.float64:
+        if D > wp.float64(0.0):
+            delta = chang_cooper_delta(A*dq/D)
+            return A*delta - D/dq
+        # Continuous D -> 0 Chang--Cooper limit.
+        if A < wp.float64(0.0):
+            return A
+        return wp.float64(0.0)
+
     @wp.kernel
     def fill_local_csr_topology_kernel(
         row_ptr: wp.array(dtype=wp.int32),
@@ -833,6 +930,9 @@ if wp is not None:
         xi_centers: wp.array(dtype=wp.float64),
         radial_volume: wp.array(dtype=wp.float64),
         cell_volume: wp.array(dtype=wp.float64),
+        xi_cell_widths: wp.array(dtype=wp.float64),
+        p_face_spacing: wp.array(dtype=wp.float64),
+        xi_face_spacing: wp.array(dtype=wp.float64),
         cf_faces: wp.array(dtype=wp.float64),
         ca_faces: wp.array(dtype=wp.float64),
         nud_centers: wp.array(dtype=wp.float64),
@@ -843,8 +943,6 @@ if wp is not None:
         xp_slot: wp.array(dtype=wp.int32),
         Np: int,
         Nxi: int,
-        dp: wp.float64,
-        dxi: wp.float64,
         Ebar: wp.float64,
         alpha: wp.float64,
         values: wp.array(dtype=wp.float64),
@@ -855,6 +953,7 @@ if wp is not None:
         i = row // Nxi
         j = row - i*Nxi
         xi = xi_centers[j]
+        dxi_cell = xi_cell_widths[j]
         one_minus = wp.float64(1.0) - xi*xi
         self_L = wp.float64(0.0)
 
@@ -865,15 +964,9 @@ if wp is not None:
             gam = wp.sqrt(wp.float64(1.0) + pf*pf)
             A = -Ebar*xi - alpha*gam*pf*one_minus - cf_faces[i]
             D = ca_faces[i]
-            fac = wp.float64(2.0)*wp.float64(3.14159265358979323846)*pf*pf*dxi
-            advL = wp.float64(0.0)
-            advR = wp.float64(0.0)
-            if A >= wp.float64(0.0):
-                advL = A
-            else:
-                advR = A
-            cL = fac*(advL + D/dp)/cell_volume[row-Nxi]
-            cR = fac*(advR - D/dp)/cell_volume[row]
+            fac = wp.float64(2.0)*wp.float64(3.14159265358979323846)*pf*pf*dxi_cell
+            cL = fac*chang_cooper_left_coefficient(A, D, p_face_spacing[i])/cell_volume[row-Nxi]
+            cR = fac*chang_cooper_right_coefficient(A, D, p_face_spacing[i])/cell_volume[row]
             values[pm_slot[row]] = -cL
             self_L += cR
         else:
@@ -881,11 +974,11 @@ if wp is not None:
             gam = wp.sqrt(wp.float64(1.0) + pf*pf)
             A = -Ebar*xi - alpha*gam*pf*one_minus - cf_faces[0]
             D = ca_faces[0]
-            fac = wp.float64(2.0)*wp.float64(3.14159265358979323846)*pf*pf*dxi
-            advR = wp.float64(0.0)
-            if A < wp.float64(0.0):
-                advR = A
-            self_L += fac*(advR - wp.float64(2.0)*D/dp)/cell_volume[row]
+            fac = wp.float64(2.0)*wp.float64(3.14159265358979323846)*pf*pf*dxi_cell
+            boundary_coeff = chang_cooper_right_coefficient(
+                A, D, p_face_spacing[0]
+            )
+            self_L += fac*boundary_coeff/cell_volume[row]
 
         # Right radial face: -F_right.  At pmax only positive outward drift is
         # allowed; its loss coefficient is also the successful-escape RHS.
@@ -894,15 +987,9 @@ if wp is not None:
             gam = wp.sqrt(wp.float64(1.0) + pf*pf)
             A = -Ebar*xi - alpha*gam*pf*one_minus - cf_faces[i+1]
             D = ca_faces[i+1]
-            fac = wp.float64(2.0)*wp.float64(3.14159265358979323846)*pf*pf*dxi
-            advL = wp.float64(0.0)
-            advR = wp.float64(0.0)
-            if A >= wp.float64(0.0):
-                advL = A
-            else:
-                advR = A
-            cL = fac*(advL + D/dp)/cell_volume[row]
-            cR = fac*(advR - D/dp)/cell_volume[row+Nxi]
+            fac = wp.float64(2.0)*wp.float64(3.14159265358979323846)*pf*pf*dxi_cell
+            cL = fac*chang_cooper_left_coefficient(A, D, p_face_spacing[i+1])/cell_volume[row]
+            cR = fac*chang_cooper_right_coefficient(A, D, p_face_spacing[i+1])/cell_volume[row+Nxi]
             self_L -= cL
             values[pp_slot[row]] = cR
         else:
@@ -910,7 +997,7 @@ if wp is not None:
             gam = wp.sqrt(wp.float64(1.0) + pf*pf)
             A = -Ebar*xi - alpha*gam*pf*one_minus - cf_faces[Np]
             if A > wp.float64(0.0):
-                c = wp.float64(2.0)*wp.float64(3.14159265358979323846)*pf*pf*dxi*A/cell_volume[row]
+                c = wp.float64(2.0)*wp.float64(3.14159265358979323846)*pf*pf*dxi_cell*A/cell_volume[row]
                 self_L -= c
 
         p = p_centers[i]
@@ -923,14 +1010,8 @@ if wp is not None:
             om = wp.float64(1.0) - xf*xf
             A = om*(-Ebar/p + alpha*xf/gamc)
             D = wp.float64(0.5)*nud_centers[i]*om
-            advL = wp.float64(0.0)
-            advR = wp.float64(0.0)
-            if A >= wp.float64(0.0):
-                advL = A
-            else:
-                advR = A
-            cL = rv*(advL + D/dxi)/cell_volume[row-1]
-            cR = rv*(advR - D/dxi)/cell_volume[row]
+            cL = rv*chang_cooper_left_coefficient(A, D, xi_face_spacing[j])/cell_volume[row-1]
+            cR = rv*chang_cooper_right_coefficient(A, D, xi_face_spacing[j])/cell_volume[row]
             values[xm_slot[row]] = -cL
             self_L += cR
 
@@ -940,14 +1021,8 @@ if wp is not None:
             om = wp.float64(1.0) - xf*xf
             A = om*(-Ebar/p + alpha*xf/gamc)
             D = wp.float64(0.5)*nud_centers[i]*om
-            advL = wp.float64(0.0)
-            advR = wp.float64(0.0)
-            if A >= wp.float64(0.0):
-                advL = A
-            else:
-                advR = A
-            cL = rv*(advL + D/dxi)/cell_volume[row]
-            cR = rv*(advR - D/dxi)/cell_volume[row+1]
+            cL = rv*chang_cooper_left_coefficient(A, D, xi_face_spacing[j+1])/cell_volume[row]
+            cR = rv*chang_cooper_right_coefficient(A, D, xi_face_spacing[j+1])/cell_volume[row+1]
             self_L -= cL
             values[xp_slot[row]] = cR
 
@@ -990,11 +1065,11 @@ if wp is not None:
     def build_success_rhs_kernel(
         p_faces: wp.array(dtype=wp.float64),
         xi_centers: wp.array(dtype=wp.float64),
+        xi_cell_widths: wp.array(dtype=wp.float64),
         cell_volume: wp.array(dtype=wp.float64),
         cf_faces: wp.array(dtype=wp.float64),
         Np: int,
         Nxi: int,
-        dxi: wp.float64,
         Ebar: wp.float64,
         alpha: wp.float64,
         rhs: wp.array(dtype=wp.float64),
@@ -1011,7 +1086,7 @@ if wp is not None:
             if A > wp.float64(0.0):
                 rhs[row] = (
                     wp.float64(2.0)*wp.float64(3.14159265358979323846)
-                    *pf*pf*dxi*A/cell_volume[row]
+                    *pf*pf*xi_cell_widths[j]*A/cell_volume[row]
                 )
 
 
@@ -1021,20 +1096,20 @@ if wp is not None:
     def build_failure_rhs_kernel(
         p_faces: wp.array(dtype=wp.float64),
         xi_centers: wp.array(dtype=wp.float64),
+        p_face_spacing: wp.array(dtype=wp.float64),
+        xi_cell_widths: wp.array(dtype=wp.float64),
         cell_volume: wp.array(dtype=wp.float64),
         cf_faces: wp.array(dtype=wp.float64),
         ca_faces: wp.array(dtype=wp.float64),
         Np: int,
         Nxi: int,
-        dp: wp.float64,
-        dxi: wp.float64,
         Ebar: wp.float64,
         alpha: wp.float64,
         rhs: wp.array(dtype=wp.float64),
     ):
         # Total loss through the shifted absorbing inner radial face.  The
-        # advective contribution is present only for outward A_p<0; radial
-        # diffusion uses the center-to-face distance dp/2.
+        # same Chang--Cooper boundary flux as the matrix assembly is used;
+        # the exterior absorbing distribution is zero.
         row = wp.tid()
         rhs[row] = wp.float64(0.0)
         i = row // Nxi
@@ -1044,13 +1119,15 @@ if wp is not None:
             pf = p_faces[0]
             gam = wp.sqrt(wp.float64(1.0) + pf*pf)
             A = -Ebar*xi - alpha*gam*pf*(wp.float64(1.0)-xi*xi) - cf_faces[0]
+            boundary_coeff = chang_cooper_right_coefficient(
+                A, ca_faces[0], p_face_spacing[0]
+            )
             loss_speed = wp.float64(0.0)
-            if A < wp.float64(0.0):
-                loss_speed = -A
-            loss_speed += wp.float64(2.0)*ca_faces[0]/dp
+            if boundary_coeff < wp.float64(0.0):
+                loss_speed = -boundary_coeff
             rhs[row] = (
                 wp.float64(2.0)*wp.float64(3.14159265358979323846)
-                *pf*pf*dxi*loss_speed/cell_volume[row]
+                *pf*pf*xi_cell_widths[j]*loss_speed/cell_volume[row]
             )
 
 
@@ -1405,7 +1482,6 @@ def gpu_relative_residual(row_ptr, col_ind, values, x, b, residual, n: int, devi
     return float(nr/nb if nb else nr)
 
 
-
 # =============================================================================
 # Time-dependent finite-horizon RPF solve
 # =============================================================================
@@ -1474,11 +1550,27 @@ def _host_success_rhs(grid: Grid, coll: CollisionData, phys: DerivedPhysics) -> 
         - coll.cf_faces[-1]
     )
     rates = (
-        2.0*math.pi*pf*pf*grid.dxi*np.maximum(A, 0.0)
+        2.0*math.pi*pf*pf*grid.xi_cell_widths*np.maximum(A, 0.0)
         / grid.cell_volume[-grid.Nxi:]
     )
     expected[-grid.Nxi:] = rates
     return expected, A
+
+
+def _chang_cooper_right_coefficient_host(A: float, D: float, dq: float) -> float:
+    if D > 0.0:
+        w = A*dq/D
+        if abs(w) < 1.0e-4:
+            w2 = w*w
+            delta = 0.5 - w/12.0 + w*w2/720.0 - w*w2*w2/30240.0
+        elif w > 50.0:
+            delta = 1.0/w
+        elif w < -50.0:
+            delta = 1.0 + 1.0/w
+        else:
+            delta = 1.0/w - 1.0/math.expm1(w)
+        return A*delta - D/dq
+    return A if A < 0.0 else 0.0
 
 
 def _host_failure_rhs(grid: Grid, coll: CollisionData, phys: DerivedPhysics) -> np.ndarray:
@@ -1490,12 +1582,21 @@ def _host_failure_rhs(grid: Grid, coll: CollisionData, phys: DerivedPhysics) -> 
         - phys.alpha*gam*pf*(1.0-grid.xi_centers**2)
         - coll.cf_faces[0]
     )
-    loss_speed = np.maximum(-A, 0.0) + 2.0*coll.ca_faces[0]/grid.dp
+    loss_speed = np.asarray([
+        max(-_chang_cooper_right_coefficient_host(float(a), float(coll.ca_faces[0]),
+                                                   float(grid.p_face_spacing[0])), 0.0)
+        for a in A
+    ], dtype=np.float64)
     expected[:grid.Nxi] = (
-        2.0*math.pi*pf*pf*grid.dxi*loss_speed
+        2.0*math.pi*pf*pf*grid.xi_cell_widths*loss_speed
         / grid.cell_volume[:grid.Nxi]
     )
     return expected
+
+
+def _terminal_cell_width(cfg: SolverConfig, grid: Grid) -> float:
+    cell = int(np.clip(np.searchsorted(grid.p_faces, cfg.terminal_p)-1, 0, grid.Np-1))
+    return float(grid.p_cell_widths[cell])
 
 
 def build_terminal_response(cfg: SolverConfig, grid: Grid) -> np.ndarray:
@@ -1510,7 +1611,7 @@ def build_terminal_response(cfg: SolverConfig, grid: Grid) -> np.ndarray:
         cut = (lo < cfg.terminal_p) & (cfg.terminal_p < hi)
         frac[cut] = (hi[cut]**3 - cfg.terminal_p**3)/den[cut]
     elif cfg.terminal_condition == "smoothed_heaviside":
-        delta_p = cfg.terminal_smoothing_cells * grid.dp
+        delta_p = cfg.terminal_smoothing_cells * _terminal_cell_width(cfg, grid)
         xq, wq = np.polynomial.legendre.leggauss(8)
         mid = 0.5*(lo + hi)
         half = 0.5*(hi - lo)
@@ -1675,6 +1776,9 @@ def solve_adjoint_rpf(
     xi_centers = wa(grid.xi_centers, wp.float64)
     radial_volume = wa(grid.radial_volume, wp.float64)
     cell_volume = wa(grid.cell_volume, wp.float64)
+    xi_cell_widths = wa(grid.xi_cell_widths, wp.float64)
+    p_face_spacing = wa(grid.p_face_spacing, wp.float64)
+    xi_face_spacing = wa(grid.xi_face_spacing, wp.float64)
     cf_faces = wa(coll.cf_faces, wp.float64)
     ca_faces = wa(coll.ca_faces, wp.float64)
     nud_centers = wa(coll.nud_centers, wp.float64)
@@ -1689,9 +1793,10 @@ def solve_adjoint_rpf(
         assemble_minus_forward_generator_kernel, dim=grid.size,
         inputs=[
             p_faces, p_centers, xi_faces, xi_centers,
-            radial_volume, cell_volume, cf_faces, ca_faces, nud_centers,
+            radial_volume, cell_volume, xi_cell_widths, p_face_spacing, xi_face_spacing,
+            cf_faces, ca_faces, nud_centers,
             topo.diag_slot, topo.pm_slot, topo.pp_slot, topo.xm_slot, topo.xp_slot,
-            grid.Np, grid.Nxi, wp.float64(grid.dp), wp.float64(grid.dxi),
+            grid.Np, grid.Nxi,
             wp.float64(phys.Ebar), wp.float64(phys.alpha),
         ],
         outputs=[forward_values], device=dev,
@@ -1708,8 +1813,8 @@ def solve_adjoint_rpf(
     wp.launch(
         build_success_rhs_kernel, dim=grid.size,
         inputs=[
-            p_faces, xi_centers, cell_volume, cf_faces,
-            grid.Np, grid.Nxi, wp.float64(grid.dxi),
+            p_faces, xi_centers, xi_cell_widths, cell_volume, cf_faces,
+            grid.Np, grid.Nxi,
             wp.float64(phys.Ebar), wp.float64(phys.alpha),
         ],
         outputs=[success_rhs], device=dev,
@@ -1717,8 +1822,8 @@ def solve_adjoint_rpf(
     wp.launch(
         build_failure_rhs_kernel, dim=grid.size,
         inputs=[
-            p_faces, xi_centers, cell_volume, cf_faces, ca_faces,
-            grid.Np, grid.Nxi, wp.float64(grid.dp), wp.float64(grid.dxi),
+            p_faces, xi_centers, p_face_spacing, xi_cell_widths, cell_volume,
+            cf_faces, ca_faces, grid.Np, grid.Nxi,
             wp.float64(phys.Ebar), wp.float64(phys.alpha),
         ],
         outputs=[failure_rhs], device=dev,
@@ -1809,7 +1914,6 @@ def solve_adjoint_rpf(
     tr_stage2_first_solve_s = 0.0
     tr_stage1_first_residual = math.nan
     tr_stage2_first_residual = math.nan
-
     def check_probability_flag() -> None:
         flag = int(np.asarray(probability_flag.numpy(), dtype=np.int32)[0])
         if flag >= 2:
@@ -2165,6 +2269,9 @@ def load_config(config_path: Path | None = None) -> tuple[SolverConfig, str, Pat
         solve_mode=str(solve_cfg.get("mode", "steady_and_time")).strip().lower(),
         Np=int(grid["Np"]), Nxi=int(grid["Nxi"]),
         pmin=float(grid["pmin"]), pmax=float(grid["pmax"]),
+        p_mapping=str(grid.get("p_mapping", "uniform")).strip().lower(),
+        p_mapping_kappa=float(grid.get("p_mapping_kappa", 4.0)),
+        xi_mapping=str(grid.get("xi_mapping", "uniform")).strip().lower(),
         terminal_p=float(time_cfg.get("terminal_p", 1.25)),
         terminal_condition=str(time_cfg.get("terminal_condition", "heaviside")).strip().lower(),
         terminal_smoothing_cells=float(time_cfg.get("terminal_smoothing_cells", 2.0)),
@@ -2189,7 +2296,11 @@ def print_problem(cfg: SolverConfig, phys: DerivedPhysics, grid: Grid,
     print("=== standalone 0D-2P adjoint/RPF solver: steady + optional TR-BDF2 ===")
     print(f"solve mode={cfg.solve_mode}")
     print(f"execution=gpu-warp-cudss  grid={grid.Np}x{grid.Nxi}  state={grid.size:,}")
-    print(f"p=[{cfg.pmin:g},{cfg.pmax:g}]  dp={grid.dp:.6e}  dxi={grid.dxi:.6e}")
+    print(
+        f"p=[{cfg.pmin:g},{cfg.pmax:g}]  p_mapping={cfg.p_mapping}  "
+        f"dp=[{grid.p_cell_widths.min():.6e},{grid.p_cell_widths.max():.6e}]  "
+        f"dxi={grid.dxi:.6e}"
+    )
     print("radial boundaries: pmin=absorbing failure, pmax=open successful outflow where U_p>0")
     if cfg.solve_mode == "steady_and_time":
         if cfg.terminal_condition == "heaviside":
@@ -2201,7 +2312,8 @@ def print_problem(cfg: SolverConfig, phys: DerivedPhysics, grid: Grid,
             print(
                 f"terminal condition: smoothed H(p-p_RE), p_RE={cfg.terminal_p:.8g}  "
                 f"width={cfg.terminal_smoothing_cells:.6g} cells = "
-                f"{cfg.terminal_smoothing_cells*grid.dp:.6e} in p (tanh, p^2-FV averaged)"
+                f"{cfg.terminal_smoothing_cells*_terminal_cell_width(cfg, grid):.6e} in p "
+                "(tanh, p^2-FV averaged)"
             )
         print("integration: backward in physical time = forward in lookback s=T-t")
     else:
@@ -2381,7 +2493,7 @@ def save_result(path: Path, result: dict, cfg: SolverConfig, phys: DerivedPhysic
         terminal_condition=np.asarray(cfg.terminal_condition),
         terminal_smoothing_cells=np.asarray(cfg.terminal_smoothing_cells),
         terminal_smoothing_dp=np.asarray(
-            cfg.terminal_smoothing_cells*grid.dp
+            cfg.terminal_smoothing_cells*_terminal_cell_width(cfg, grid)
             if cfg.terminal_condition == "smoothed_heaviside" else 0.0
         ),
         diagnostic_step=np.asarray([x["step"] for x in hist], dtype=np.int64),
