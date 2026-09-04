@@ -4,7 +4,7 @@
 \usepackage{booktabs}
 \usepackage{hyperref}
 
-\title{Standalone 0D--2P Relativistic Electron Kinetic, First-Passage Adjoint, and FV-Assisted PINN Models\\Physical and Numerical Model}
+\title{Standalone 0D--2P Relativistic Electron Fokker--Planck Model\\Physical and Numerical Reference}
 \author{}
 \date{September 2026}
 
@@ -19,73 +19,33 @@
 \maketitle
 
 \noindent
-This document specifies the standalone homogeneous 0D--2P forward kinetic solver,
-the paired steady-state first-passage adjoint/runaway-probability-function (RPF), the
-finite-horizon time-dependent first-passage adjoint for prescribed, constant plasma
-parameters, and an FV-assisted physics-informed neural-network (PINN) surrogate for the
-steady parametric RPF.  Both adjoint problems are derived from the same local forward
-kinetic generator and the same radial escape semantics; neither is an independently
-chosen kinetic model.  The PINN uses the same steady adjoint physics and is anchored by
-qualified finite-volume RPF solutions rather than defining a new kinetic model.  The
-document does not specify the 0D plasma model, self-consistent plasma--kinetic coupling,
-or a fully discrete reverse-mode adjoint of a particular forward time-marching
-trajectory.
+This document specifies the spatially homogeneous 0D--2P forward relativistic
+electron Fokker--Planck model and its GPU finite-volume realization.  The model
+includes electric-field acceleration, relativistic small-angle collisions,
+synchrotron radiation reaction, and an optional Chiu--Harvey large-angle
+secondary-electron source.  Plasma quantities are prescribed and constant for
+the present solver.  Future work will exchange state and source information
+with a time-dependent bulk plasma model while preserving the conservative
+finite-volume and direct-solver contracts defined here.
 
-\medskip
+The numerical reference covers the dimensional and normalized equations, fixed
+coefficient construction, conservative cell-content discretization, boundary
+conditions, implicit time integration, GPU-resident CSR assembly, cuDSS solves,
+and forward-solver qualification.  Its scope ends with forward evolution and
+the numerical diagnostics required to qualify that evolution.
 
-\noindent
-Revision v15.4 retains the unified steady and finite-horizon first-passage implementation
-of v15.3 and adds Sec.~\ref{sec:fv_assisted_pinn}, which specifies the current FV-assisted
-parametric steady-RPF PINN workflow.  The new surrogate path samples prescribed plasma
-states, generates qualified steady RPF labels with the same adjoint FV solver, and trains
-one neural representation with a combined continuum-adjoint PDE residual, successful
-outer-boundary loss, and FV data loss.  The FV solve remains outside automatic
-differentiation.  Full-batch Adam is followed by configurable blockwise SSBroyden; each
-SSBroyden block starts a fresh inverse-Hessian approximation and PDE/boundary collocation
-points may optionally be resampled between blocks to control fixed-collocation overfitting.
-Whole-batch and exact chunked reductions are both supported.
+Revision v15.4 is reorganized here as a forward-only reference.  The equations
+and numerical conventions retained below are the authority for
+`forward_fv_solver.py` and `forward_fv_solver.toml`.
 
-The underlying unified adjoint path constructs the qualified local
-forward generator $L_0$, forms the exact discrete transpose $A=-L_0^T$, constructs the success
-and failure escape vectors, performs the transpose/escape qualification, and solves the direct
-steady RPF
-\begin{equation*}
- A\bm P_{\rm ss}=\bm r_{\rm RE}
-\end{equation*}
-with cuDSS.  The configuration key \texttt{[solve].mode} then selects either
-\texttt{steady}, which returns after this qualified steady solve, or
-\texttt{steady\_and\_time}, which retains $\bm P_{\rm ss}$ on the GPU and continues with the
-finite-horizon adjoint.  A separate ``time-only'' execution path is intentionally unnecessary
-because the direct steady solution is already the target used to qualify and terminate the
-transient calculation.
-
-For \texttt{steady\_and\_time}, revision v15.3 replaces the earlier backward-Euler-started
-BDF2 march by fixed-step TR--BDF2 with $\gamma=2-\sqrt{2}$.  For this choice, the trapezoidal
-and BDF2 substeps share the same implicit matrix
-\begin{equation*}
- M=I+\frac{\gamma}{2}\Delta\tau\,A,
-\end{equation*}
-so the complete steady-plus-time calculation requires only two numerical factorizations:
-one of $A$ for the steady RPF and one of $M$ reused by both TR--BDF2 stages for every transient
-step.  Each full transient step uses two cuDSS solves and one GPU CSR matrix--vector product.
-There is no backward-Euler startup and no multistep history.  The terminal response is independently
-configurable as either the exact discontinuous Heaviside $H(p-p_{\rm RE})$ or a tanh-smoothed
-Heaviside; both are projected with the same $p^2\,dp$ finite-volume measure as the kinetic state.
-Below threshold, the successful outer-boundary set vanishes naturally, so
-$\bm r_{\rm RE}=0$ and $\bm P_{\rm ss}=0$ without any hard-coded electric-field threshold.
-The GPU-resident steady-target comparison, exact transpose/escape identities, collision-layer
-hierarchy, and separation of the Chiu--Harvey branching source from the tagged-electron generator
-are otherwise unchanged.
 %===============================================================================
 \section{Physical model}
 
 The present model is a spatially homogeneous, gyrotropic electron kinetic system in
 momentum magnitude and pitch angle.  All plasma quantities are prescribed and constant
-in time.  No plasma evolution, spatial transport, or fully discrete reverse-mode adjoint
-is part of the present specification.  The steady-state first-passage adjoint associated
-with this forward model is defined in Secs.~3 and 4, its finite-horizon time-dependent
-extension is defined in Sec.~5, and the FV-assisted parametric steady-RPF PINN is defined
-in Sec.~\ref{sec:fv_assisted_pinn}.  The physical system is defined below in dimensional
+in time.  Plasma evolution, spatial transport, and kinetic--bulk feedback are outside
+the current standalone problem; they are specified as future coupling requirements in
+Sec.~\ref{sec:future_bulk_coupling}.  The physical system is defined below in dimensional
 form.  No reference normalization used by the numerical solver is introduced until the
 final subsection of this section.
 
@@ -111,8 +71,7 @@ Fokker--Planck collision operator, $\mathcal E$ is acceleration by the parallel
 electric field, $\mathcal R_{\rm syn}$ is synchrotron radiation reaction, and
 $\mathcal S_{\rm LA}$ is either zero or the Chiu--Harvey large-angle
 secondary-electron gain operator defined below.  The same forward operator structure is standard in relativistic runaway-electron
-kinetics; see, for example, Refs.~\cite{BraamsKarney1989,Hesslow2019Dreicer,
-McDevitt2025Dynamics}.
+kinetics; see, for example, Ref.~\cite{BraamsKarney1989}.
 
 The dimensional distribution is defined such that its momentum-space integral gives the
 represented electron density,
@@ -153,7 +112,7 @@ The corresponding conservative kinetic operator is
 \end{equation}
 This is the standard homogeneous relativistic electric-field operator used in
 runaway-electron Fokker--Planck models; see
-Refs.~\cite{ConnorHastie1975,McDevitt2025Dynamics}.
+Refs.~\cite{ConnorHastie1975}.
 
 \subsection{Small-angle test-particle collision-model hierarchy}
 
@@ -199,7 +158,7 @@ Equation~\eqref{eq:collision_operator_dimensional} is the relativistic test-part
 operator of Braams--Karney/Pike--Rose form.  Its thermal-log complete-screening base
 coefficients are written below; the common energy-dependent Coulomb-logarithm and
 partial-screening layers are then specified separately following
-Refs.~\cite{BraamsKarney1989,PikeRose2014,Hesslow2018Collision,Hesslow2019Dreicer}.
+Refs.~\cite{BraamsKarney1989,PikeRose2014,Hesslow2018Collision}.
 The field-particle part of the small-angle collision operator is not retained in the
 present model.
 
@@ -223,8 +182,8 @@ PDE used by the numerical solver.  Define the physical relativistic collision ti
  \label{eq:physical_collision_time}
 \end{equation}
 where $n_e$ and $T_e$ are the prescribed free-electron density and temperature and
-$\ln\Lambda_0$ is the thermal Coulomb logarithm.  Following Appendix A of
-Hesslow et al.~\cite{Hesslow2019Dreicer}, first define the finite-temperature
+$\ln\Lambda_0$ is the thermal Coulomb logarithm.  Following the finite-temperature
+construction in Ref.~\cite{Hesslow2018Collision}, first define the finite-temperature
 \emph{thermal-log} complete-screening base by setting both collisional logarithms equal
 to $\ln\Lambda_0$.  It is useful to keep the electron--electron and electron--ion
 parts of the deflection frequency separate:
@@ -286,7 +245,7 @@ The thermal logarithm appearing in Eq.~\eqref{eq:physical_collision_time} is
 \paragraph{Energy-dependent Coulomb-logarithm correction common to both base models.}
 The thermal-to-relativistic matching of the Coulomb logarithms is a physical correction
 layer, not part of the definition of either small-angle base kernel.  Following Hesslow
-et al.~\cite{Hesslow2019Dreicer}, define
+et al.~\cite{Hesslow2018Collision}, define
 \begin{align}
  \ln\Lambda_{ee}(u)
  &=\ln\Lambda_0+\frac{1}{k}
@@ -332,7 +291,7 @@ solver-normalized formulas in Sec.~2.
 \paragraph{Partial-screening correction common to both base models.}
 For a partially ionized ion species $a$ with atomic number $Z_a$, ion charge
 $Z_{0a}$, density $n_a$, and number of bound electrons $N_a=Z_a-Z_{0a}$, define
-\cite{Hesslow2017Screening,Hesslow2018Collision,Hesslow2019Dreicer}
+\cite{Hesslow2017Screening,Hesslow2018Collision}
 \begin{align}
  h(u)
  &=\sum_a\frac{n_a}{n_e}N_a
@@ -497,13 +456,13 @@ The conservative operator is
  \label{eq:synch_operator_dimensional}
 \end{equation}
 This is the standard gyro-averaged synchrotron reaction used in homogeneous
-runaway-electron kinetic models; see Refs.~\cite{Andersson2001,McDevitt2025Dynamics}.
+runaway-electron kinetic models; see Refs.~\cite{Andersson2001}.
 
 \subsection{Chiu--Harvey large-angle secondary-electron gain}
 
 The production model uses a single optional large-angle secondary-electron gain model:
 the finite-primary-energy, aligned-primary Chiu--Harvey source
-\cite{Chiu1998,Harvey2000,Arnaud2025}.  The source is gain only: it adds the represented
+\cite{Chiu1998,Harvey2000}.  The source is gain only: it adds the represented
 secondary electron but does not include the compensating recoil/loss of the primary.
 The source may be disabled by setting $\mathcal S_{\rm LA}=0$.
 
@@ -533,7 +492,7 @@ field-aligned primary direction, $\xi'=-1$, in the relativistic electron--electr
 knock-on kinematics.
 
 The normalized M{\o}ller differential cross section underlying the Chiu--Harvey source is
-\cite{Moller1932,Chiu1998,Harvey2000,Arnaud2025}
+\cite{Moller1932,Chiu1998,Harvey2000}
 \begin{equation}
  \frac{d\overline\sigma_{\rm ee}(\gamma',\gamma)}{du}
  =2\pi
@@ -626,7 +585,7 @@ The dimensional large-angle term is therefore simply
 \end{equation}
 The target density $n_t$ is explicit and denotes the population treated as cold
 stationary target electrons for the knock-on source.  For the partially ionized
-application of Ref.~\cite{Arnaud2025}, $n_t$ is the total free-plus-bound electron
+application of Ref.~, $n_t$ is the total free-plus-bound electron
 density; in the standalone solver it is an explicit prescribed physical input.
 
 \subsection{Prescribed plasma state, initial condition, and moments}
@@ -1719,1135 +1678,38 @@ directly for each selected physical configuration.
 
 
 %===============================================================================
-\section{Steady-state first-passage adjoint and runaway probability function}
-\label{sec:steady_adjoint_physics}
-
-The forward model of Secs.~1 and 2 also defines a natural backward first-passage
-question: for an electron initially represented at $(p,\xi)$, what is the probability
-that its subsequent \emph{local} kinetic evolution leaves the represented domain through
-the successful runaway part of the outer radial boundary before it is lost through the
-inner failure boundary?  The corresponding dimensionless function
-\begin{equation}
-  P(p,\xi)\in[0,1]
-  \label{eq:rpf_definition}
-\end{equation}
-is called the steady-state runaway probability function (RPF).
-
-The RPF is paired with the same electric-field, small-angle collision, synchrotron, and
-boundary model as the local forward solver.  In particular, selection of the finite-
-temperature or fully-relativistic asymptotically matched small-angle base changes only
-the forward coefficient values inherited by the adjoint.  The common energy-dependent
-Coulomb-logarithm and partial-screening layers of Sec.~1 are inherited without change and
-remain independent of the selected small-angle base.
-
-The Chiu--Harvey large-angle gain is deliberately \emph{not} part of the single-particle
-first-passage generator.  It creates additional electrons and is therefore a branching
-source rather than a local transition of the tagged electron whose first-passage
-probability is being computed.  Section~\ref{sec:rpf_ch_contraction} shows how the
-resulting RPF is contracted with the Chiu--Harvey source after the local first-passage
-problem has been solved.
-
-\subsection{Local forward generator and weighted adjoint}
-\label{sec:continuum_adjoint_operator}
-
-Set $S_{\rm LA}=0$ in Eq.~\eqref{eq:normalized_forward} and denote the resulting local
-forward differential generator by $\mathcal L_0$, so that
-\begin{equation}
- \frac{\partial f}{\partial\tau}=\mathcal L_0 f.
- \label{eq:local_forward_generator_continuum}
-\end{equation}
-The natural pairing is the physical momentum-space measure already used throughout the
-forward model,
-\begin{equation}
- \langle P,f\rangle_\mu
- =2\pi\int_{p_{\min}}^{p_{\max}}p^2\,dp
-      \int_{-1}^{1}P(p,\xi)f(p,\xi)\,d\xi.
- \label{eq:adjoint_weighted_pairing}
-\end{equation}
-Away from radial boundaries, integration by parts gives the backward differential
-operator
-\begin{equation}
- \boxed{
- \mathcal L_0^\dagger P
- =A_p\frac{\partial P}{\partial p}
- +\frac{1}{p^2}\frac{\partial}{\partial p}
-  \left(p^2C_A\frac{\partial P}{\partial p}\right)
- +A_\xi\frac{\partial P}{\partial\xi}
- +\frac{\partial}{\partial\xi}
-  \left[D_\xi\frac{\partial P}{\partial\xi}\right]
- }
- \label{eq:continuum_backward_operator}
-\end{equation}
-with
-\begin{equation}
- D_\xi(p,\xi)=\frac{\nu_D(p)}{2}(1-\xi^2).
- \label{eq:adjoint_pitch_diffusion}
-\end{equation}
-All coefficients in Eqs.~\eqref{eq:continuum_backward_operator} and
-\eqref{eq:adjoint_pitch_diffusion} are exactly those of the selected forward
-configuration.  No separate adjoint collision coefficients are introduced.
-
-Equation~\eqref{eq:continuum_backward_operator} is useful for physical interpretation,
-but the production numerical RPF is not obtained by separately discretizing this
-continuum expression.  The finite-volume first-passage problem is instead defined by the
-exact algebraic transpose of the already assembled forward cell-content generator, as
-specified in Sec.~4.  This avoids ambiguity from independently approximating the
-boundary terms or the phase-space measure.
-
-\subsection{Successful and failed radial escape}
-\label{sec:rpf_boundary_semantics}
-
-The steady RPF uses a shifted suprathermal radial domain with $p_{\min}>0$.  The inner
-boundary represents failure to run away.  The outer boundary represents successful
-runaway only when the local radial drift points outward.  Define the successful subset
-of the outer boundary by
-\begin{equation}
- \Gamma_{\rm RE}
- =\left\{(p_{\max},\xi):A_p(p_{\max},\xi)>0\right\}.
- \label{eq:rpf_success_boundary}
-\end{equation}
-For the zero-inflow/open-outflow outer boundary of Sec.~2, the instantaneous normalized
-successful escape flux is
-\begin{equation}
- \Phi_{\rm RE}[f]
- =2\pi p_{\max}^2
-   \int_{-1}^{1}
-   \left[A_p(p_{\max},\xi)\right]_+
-   f(p_{\max},\xi)\,d\xi.
- \label{eq:continuum_success_flux}
-\end{equation}
-The shifted inner boundary uses the absorbing failure semantics of
-Sec.~2.  Escape there contributes no successful-runaway response.
-
-When radial energy diffusion is disabled, the continuum first-passage interpretation is
-the familiar backward equation
-\begin{equation}
- \mathcal L_0^\dagger P=0
- \label{eq:continuum_steady_rpf}
-\end{equation}
-in the transient interior, with $P=0$ on the failure exit and $P=1$ on the successful
-outer exit.  At $\xi=\pm1$ there is no absorbing event: both pitch drift and pitch
-diffusion vanish through $1-\xi^2$ and the solution is regular there.
-
-If radial energy diffusion is retained, the forward model combines an absorbing
-center-to-face diffusive condition at the inner boundary with zero diffusive flux at the
-outer boundary and the same advective success criterion in
-Eq.~\eqref{eq:rpf_success_boundary}.  Rather than imposing an independently discretized
-mixed adjoint boundary condition, the present model defines the RPF by exact transpose
-of those forward boundary fluxes.  The discrete formulation in Sec.~4 is therefore the
-authoritative boundary definition for both $C_A=0$ and $C_A\ne0$.
-
-The infinite-horizon steady RPF requires the transient local generator to be absorbing
-in the probabilistic sense: every represented state must ultimately lose its probability
-mass through the designated radial exits, or at least the linear system must have a
-unique solution for the requested response.  A singular or nearly singular
-$-L_0^T$ is consequently a physical/numerical warning that the chosen domain and
-parameters do not define a well-conditioned infinite-horizon first-passage problem.
-
-\subsection{RPF as the representer of integrated successful escape}
-\label{sec:rpf_response_identity}
-
-Let $f_0$ be an arbitrary nonnegative initial distribution supported inside the
-represented domain, and evolve Eq.~\eqref{eq:local_forward_generator_continuum} with the
-radial boundary semantics above.  The total normalized density that eventually escapes
-through the successful outer boundary is
-\begin{equation}
- \mathcal R_{\rm RE}[f_0]
- =\int_0^\infty \Phi_{\rm RE}[f(\tau)]\,d\tau.
- \label{eq:integrated_success_response}
-\end{equation}
-The RPF is the phase-space representer of this linear response,
-\begin{equation}
- \boxed{
- \mathcal R_{\rm RE}[f_0]
- =2\pi\int_{p_{\min}}^{p_{\max}}p^2\,dp
-       \int_{-1}^{1}P(p,\xi)f_0(p,\xi)\,d\xi.
- }
- \label{eq:rpf_continuum_response}
-\end{equation}
-Thus $P(p,\xi)$ is not an arbitrary adjoint field: it is precisely the eventual
-successful-escape probability associated with the local forward dynamics and the chosen
-radial first-passage definition.
-
-For a normalized initial probability density, Eq.~\eqref{eq:rpf_continuum_response} is
-the probability of eventual successful runaway.  For a physical or normalized electron
-density, the same equation gives the corresponding amount of represented density that
-will eventually escape through the successful boundary.
-
-\subsection{Contraction with sources and the Chiu--Harvey gain}
-\label{sec:rpf_ch_contraction}
-
-Once the single-particle RPF has been computed, any source of new electrons can be
-weighted by $P$ to determine the eventual successful-runaway yield of those newly born
-electrons.  In the finite-volume state this becomes especially simple.  If
-$\bm s$ is an instantaneous source of cell contents, then
-\begin{equation}
- \mathcal Y_{\rm RE}[\bm s]=\bm P^T\bm s.
- \label{eq:rpf_source_contraction}
-\end{equation}
-
-For the Chiu--Harvey source of Sec.~2,
-$L_{\rm CH}=U_{\rm CH}R_{\rm CH}$, so the instantaneous eventual-runaway yield of the
-secondary electrons produced from a current forward state $\bm N$ is
-\begin{equation}
- \boxed{
- \mathcal Y_{\rm RE}^{\rm CH}[\bm N]
- =\bm P^T L_{\rm CH}\bm N
- =\bm P^T U_{\rm CH}R_{\rm CH}\bm N
- =\left(U_{\rm CH}^T\bm P\right)^T R_{\rm CH}\bm N.
- }
- \label{eq:rpf_ch_contraction}
-\end{equation}
-This contraction does not put Chiu--Harvey branching into the RPF equation.  It uses the
-local first-passage probability as a response weight on the independently defined
-large-angle source.  This separation is the intended architecture for later avalanche
-closures and surrogate construction.
-
-%===============================================================================
-\section{Discrete steady-state adjoint model}
-\label{sec:steady_adjoint_numerics}
-
-The numerical RPF is defined directly from the local forward finite-volume generator of
-Sec.~2.  This is a discrete-adjoint construction: the forward operator is assembled once
-with the selected physical coefficients and boundary fluxes, and its algebraic transpose
-is used exactly.  No continuum adjoint stencil is independently derived or coded.
-
-\subsection{Cell-content generator and absence of an adjoint mass matrix}
-\label{sec:rpf_discrete_state}
-
-Disable the large-angle gain and write the local semidiscrete forward problem as
-\begin{equation}
- \boxed{
- \frac{d\bm N}{d\tau}=L_0\bm N,
- }
- \label{eq:rpf_forward_semidiscrete}
-\end{equation}
-where $\bm N$ is the cell-content state of Eq.~\eqref{eq:cellcontent}.  The phase-space
-measure is already contained in each component of $\bm N$.  Therefore the dual pairing
-between a cellwise probability vector $\bm P$ and a cell-content vector $\bm N$ is the
-ordinary Euclidean contraction
-\begin{equation}
- \langle\bm P,\bm N\rangle=\bm P^T\bm N.
- \label{eq:rpf_discrete_pairing}
-\end{equation}
-Consequently the exact discrete adjoint of $L_0$ is simply $L_0^T$.  No additional
-finite-volume mass matrix appears.  A mass-matrix transformation would be required only
-if the numerical state were instead stored as cell-centered distribution values rather
-than physical cell contents.
-
-\subsection{Successful-escape rate vector}
-\label{sec:rpf_success_vector}
-
-The open outer boundary in Eq.~\eqref{eq:outer_flux} removes cell content from the last
-radial shell.  The portion identified as successful runaway can therefore be represented
-by a nonnegative vector $\bm r_{\rm RE}$ satisfying
-\begin{equation}
- \Phi_{\rm RE}^{\rm FV}(\bm N)=\bm r_{\rm RE}^T\bm N.
- \label{eq:rpf_discrete_success_flux}
-\end{equation}
-For the present first-order outer flux,
-\begin{equation}
- (r_{\rm RE})_{ij}
- =\begin{cases}
- 0, & i<N_p,\\[4pt]
- \displaystyle
- \frac{2\pi p_{\max}^2\Delta\xi}{V_{N_pj}}
- \left[A_p(p_{\max},\xi_j)\right]_+,
- & i=N_p.
- \end{cases}
- \label{eq:rpf_success_rate_vector}
-\end{equation}
-The lower absorbing boundary contributes failure loss to $L_0$ but not to
-$\bm r_{\rm RE}$.  Thus the right-hand side distinguishes successful outer escape from
-all other loss while using exactly the same forward boundary coefficients.
-
-\subsection{Steady discrete first-passage equation}
-\label{sec:rpf_discrete_equation}
-
-Assume the local forward state decays sufficiently that
-$\exp(L_0\tau)\to0$ as $\tau\to\infty$.  Starting from an arbitrary cell-content vector
-$\bm N^0$, the total successful escape is
-\begin{align}
- \int_0^\infty \bm r_{\rm RE}^T e^{L_0\tau}\bm N^0\,d\tau
- &=-\bm r_{\rm RE}^T L_0^{-1}\bm N^0 \\
- &=\left[(-L_0^T)^{-1}\bm r_{\rm RE}\right]^T\bm N^0.
- \label{eq:rpf_discrete_integral_identity}
-\end{align}
-It follows that the discrete RPF is the unique solution of
-\begin{equation}
- \boxed{
- (-L_0^T)\bm P=\bm r_{\rm RE}.
- }
- \label{eq:rpf_discrete_linear_system}
-\end{equation}
-For a unit cell-content initial state $\bm e_k$,
-\begin{equation}
- P_k
- =\int_0^\infty
-   \bm r_{\rm RE}^T e^{L_0\tau}\bm e_k\,d\tau,
- \label{eq:rpf_cell_probability}
-\end{equation}
-which makes the first-passage interpretation explicit.  For any nonnegative initial
-state,
-\begin{equation}
- \boxed{
- N_{\rm RE}^{(\infty)}=\bm P^T\bm N^0
- }
- \label{eq:rpf_discrete_response}
-\end{equation}
-is the normalized cell content that eventually leaves through the successful outer
-boundary.
-
-Equation~\eqref{eq:rpf_discrete_linear_system} also gives the exact discrete-duality
-identity
-\begin{equation}
- \boxed{
- \bm P^T(-L_0)\bm N
- =\bm r_{\rm RE}^T\bm N
- }
- \label{eq:rpf_discrete_duality}
-\end{equation}
-for every test vector $\bm N$.  This identity is one of the primary implementation
-checks because it simultaneously tests the forward matrix, the transpose, the RPF
-solution, and the successful-escape vector.
-
-\subsection{Failure complement and probability bounds}
-\label{sec:rpf_probability_partition}
-
-Let $\bm r_{\rm F}$ denote the corresponding total failure-loss rate vector at the
-shifted inner boundary.  With no large-angle source and no other particle source, the
-finite-volume balance gives
-\begin{equation}
- -L_0^T\bm 1=\bm r_{\rm RE}+\bm r_{\rm F}.
- \label{eq:rpf_total_escape_identity}
-\end{equation}
-If $\bm P_{\rm F}$ solves
-\begin{equation}
- (-L_0^T)\bm P_{\rm F}=\bm r_{\rm F},
- \label{eq:rpf_failure_probability}
-\end{equation}
-and $-L_0^T$ is nonsingular, then
-\begin{equation}
- \boxed{
- \bm P+\bm P_{\rm F}=\bm 1.
- }
- \label{eq:rpf_probability_partition}
-\end{equation}
-The expected probability bounds are therefore
-\begin{equation}
- 0\le P_k\le1.
- \label{eq:rpf_probability_bounds}
-\end{equation}
-Material violations of Eq.~\eqref{eq:rpf_probability_bounds} indicate an error in the
-operator/boundary construction, loss of the generator sign structure, an ill-conditioned
-first-passage problem, or insufficient numerical accuracy.  Small roundoff-level
-excursions may occur in a direct solve and are assessed against the linear residual.
-
-\subsection{Exact transpose on the five-point finite-volume graph}
-\label{sec:rpf_exact_transpose}
-
-The local first-order finite-volume operator couples each cell only to its radial and
-pitch nearest neighbors, so the sparsity graph of $-L_0$ is the same five-point graph
-used by the forward solver.  The graph is structurally symmetric even though the matrix
-values are not.  The steady RPF implementation therefore proceeds in three steps:
-\begin{enumerate}
- \item assemble the values of $-L_0$ with exactly the forward flux formulas of
-       Sec.~2, including the absorbing inner and open successful outer boundary terms;
- \item transpose the matrix values exactly on the same CSR graph to form $-L_0^T$;
- \item construct $\bm r_{\rm RE}$ from the same positive outer-boundary drift used by
-       the forward loss flux and solve Eq.~\eqref{eq:rpf_discrete_linear_system}.
-\end{enumerate}
-Because the transpose is algebraic, changing the selected small-angle base, turning the
-common Coulomb-logarithm or partial-screening layers on through the physical
-configuration, changing the electric field or magnetic field, or enabling radial energy
-diffusion requires no separate adjoint discretization.  The adjoint automatically
-inherits the resulting forward matrix.
-
-\subsection{GPU sparse-direct realization}
-\label{sec:rpf_gpu_solve}
-
-The standalone steady RPF implementation uses the same GPU-oriented sparse architecture
-as the forward solver.  The five-point CSR topology and slot maps are constructed once.
-The forward values of $-L_0$, the exact transpose values, and the successful-escape
-right-hand side are assembled in FP64 on the GPU.  Warp-owned device arrays are passed
-directly to cuDSS, which performs symbolic analysis, numerical factorization, and the
-production sparse-direct solve of Eq.~\eqref{eq:rpf_discrete_linear_system}.  The same
-analysis and factorization may then be reused for the independent failure-probability
-right-hand side in Eq.~\eqref{eq:rpf_failure_probability}; this second solve is a
-qualification operation and does not change the RPF definition.  The matrix is treated
-as general; no symmetry of the values is assumed.
-
-The sparse-direct residual is evaluated from the actual GPU matrix and solution,
-\begin{equation}
- \epsilon_{\rm RPF}
- =\frac{\|(-L_0^T)\bm P-\bm r_{\rm RE}\|_2}
-        {\|\bm r_{\rm RE}\|_2},
- \label{eq:rpf_linear_residual}
-\end{equation}
-with the unnormalized numerator used if $\bm r_{\rm RE}=0$.  Symbolic analysis may be
-reused when only matrix values change on an unchanged sparsity graph.
-
-\subsection{Required adjoint/RPF qualification tests}
-\label{sec:rpf_qualification}
-
-The steady adjoint is not qualified merely by obtaining a visually plausible contour of
-$P$.  The following checks are required in addition to the forward-model qualification
-of Sec.~2.
-
-\begin{enumerate}
- \item \textbf{Exact matrix transpose.}
-       On representative small and production meshes, the GPU $-L_0^T$ values must agree
-       with an independently formed explicit transpose of the assembled forward CSR
-       matrix to floating-point accuracy, including every radial boundary row.
-
- \item \textbf{Successful-escape vector.}
-       The nonzero entries of $\bm r_{\rm RE}$ must occur only in the outer radial shell
-       and must reproduce Eq.~\eqref{eq:rpf_success_rate_vector}.  The successful pitch
-       mask must agree exactly with
-       $A_p(p_{\max},\xi_j)>0$.
-
- \item \textbf{Sparse residual.}
-       Equation~\eqref{eq:rpf_linear_residual} must be small compared with the spatial
-       discretization error and must remain stable under mesh refinement.
-
- \item \textbf{Discrete duality.}
-       Equation~\eqref{eq:rpf_discrete_duality} must hold to the accuracy permitted by
-       the sparse residual for deterministic and random positive test states.  This is
-       the primary end-to-end algebraic adjoint check.
-
- \item \textbf{Forward first-passage reconstruction.}
-       For selected localized or smooth initial states, direct forward propagation of
-       Eq.~\eqref{eq:rpf_forward_semidiscrete} must satisfy
-       \begin{equation}
-        \bm P^T\bm N^0
-        =\int_0^\infty\bm r_{\rm RE}^T\bm N(\tau)\,d\tau
-        \label{eq:rpf_forward_verification}
-       \end{equation}
-       after the surviving transient cell content has decayed below the requested
-       tolerance.  The standalone qualification implementation may realize this check
-       with backward Euler applied only as a forward propagator.  Writing
-       $A=-L_0$, choosing any $\Delta\tau_q>0$, and defining
-       \begin{equation}
-        (I+\Delta\tau_q A)\bm N^{n+1}=\bm N^n,
-        \label{eq:rpf_forward_be_qualification}
-       \end{equation}
-       the infinite right-endpoint sum obeys the exact resolvent identity
-       \begin{equation}
-        \boxed{
-        \Delta\tau_q\sum_{n=1}^{\infty}\bm N^n
-        =A^{-1}\bm N^0.
-        }
-        \label{eq:rpf_forward_be_sum_identity}
-       \end{equation}
-       Consequently the accumulated forward response
-       \begin{equation}
-        \mathcal R_{\rm RE}^{({\rm BE})}(M)
-        =\Delta\tau_q\sum_{n=1}^{M}\bm r_{\rm RE}^T\bm N^n
-        \label{eq:rpf_forward_be_accumulated_response}
-       \end{equation}
-       converges directly to Eq.~\eqref{eq:rpf_forward_verification} as $M\to\infty$
-       without a timestep-extrapolation error; only the un-decayed tail and linear-solve
-       error remain.  When the forward state
-       remains nonnegative and Eq.~\eqref{eq:rpf_probability_bounds} holds, the omitted
-       successful response is bounded above by the surviving total cell content.
-       The qualification step $\Delta\tau_q$ is therefore a convergence/conditioning
-       control for this check, not a production kinetic timestep.  This test compares
-       the adjoint prediction with repeated forward solves using $L_0$, rather than with
-       another adjoint implementation.
-
- \item \textbf{Probability partition.}
-       When both successful and failure escape vectors are constructed, the discrete
-       conservation identity Eq.~\eqref{eq:rpf_total_escape_identity} and the complement
-       relation Eq.~\eqref{eq:rpf_probability_partition} must hold to the expected
-       floating-point/solver accuracy.
-
- \item \textbf{Probability range.}
-       The converged solution must satisfy Eq.~\eqref{eq:rpf_probability_bounds} up to
-       errors consistent with the linear solve and spatial discretization.  Material
-       overshoot or undershoot is not accepted as a physical RPF.
-
- \item \textbf{Independent $p$ and $\xi$ convergence.}
-       The RPF transition region, selected point values, and any downstream source
-       contractions must converge under independent refinement of $N_p$ and $N_\xi$.
-       Because the first-order forward discretization supplies the exact discrete
-       adjoint, the adjoint inherits the forward scheme's discretization error; exact
-       algebraic duality does not remove the need for spatial convergence.
-
- \item \textbf{Radial-domain convergence.}
-       The inner failure boundary must be placed low enough and the successful outer
-       boundary high enough that the RPF and downstream response quantities on the
-       retained physical region are insensitive to further domain extension.  Changing
-       $p_{\max}$ also changes the formal first-passage surface, so convergence must be
-       assessed by comparing the RPF on a common interior momentum interval.
-
- \item \textbf{Collision-layer inheritance.}
-       For each small-angle base, the adjoint matrix must inherit exactly the same common
-       energy-dependent Coulomb-logarithm and partial-screening coefficients qualified
-       in Sec.~2.  No adjoint-specific collision correction is permitted.
-
- \item \textbf{Chiu--Harvey contraction.}
-       When the large-angle source is used downstream, direct evaluation of
-       $\bm P^TL_{\rm CH}\bm N$ must agree with the factorized form
-       $(U_{\rm CH}^T\bm P)^TR_{\rm CH}\bm N$ to floating-point accuracy.
-\end{enumerate}
-
-\subsection{Unified steady and steady-plus-time execution}
-\label{sec:rpf_time_dependent_scope}
-
-The steady system Eq.~\eqref{eq:rpf_discrete_linear_system} is the infinite-horizon limit of the
-finite-horizon first-passage problem introduced in Sec.~5.  The current standalone adjoint solver
-therefore treats the steady solve as the common computational core rather than as a separate code
-path.  With \texttt{[solve].mode=steady}, the calculation stops after the qualified direct solve
-of Eq.~\eqref{eq:rpf_discrete_linear_system}.  With
-\texttt{[solve].mode=steady\_and\_time}, the same $\bm P_{\rm ss}$ is retained on the GPU and
-used as the convergence target for the finite-horizon evolution.  Terminal-condition and timestep
-settings are relevant only to the latter mode.  A time-dependent calculation without first forming
-$\bm P_{\rm ss}$ is not a production mode of the present standalone solver.
-
-%===============================================================================
-\section{Finite-horizon time-dependent first-passage adjoint}
-\label{sec:time_dependent_adjoint}
-
-The qualified steady RPF of Secs.~\ref{sec:steady_adjoint_physics}--\ref{sec:rpf_qualification}
-answers an infinite-horizon first-passage question.  A distinct but closely related
-quantity is required when the runaway classification is imposed at a finite terminal
-time.  Following the terminal-value construction used in
-Ref.~\cite{McDevitt2025Dynamics}, choose a normalized terminal time $\tau_T$ and a
-terminal runaway momentum $p_{\rm RE}$ with
-$p_{\min}<p_{\rm RE}<p_{\max}$.  The finite-horizon RPF is the probability that a tagged
-electron either exits through the successful part of the outer radial boundary before
-$\tau_T$, or remains inside the represented domain at $\tau_T$ with
-$p\ge p_{\rm RE}$.  Loss through the shifted absorbing inner boundary is failure.
-
-The Chiu--Harvey large-angle gain remains excluded from the tagged-electron generator
-for the same reason as in the steady problem: it creates additional electrons rather
-than changing the state of the tagged electron.  The time-dependent RPF therefore uses
-$L_0$, not $L_0+L_{\rm CH}$.  The unified standalone adjoint script uses the fully-relativistic asymptotically matched
-small-angle configuration with the common energy-dependent Coulomb-logarithm and optional
-partial-screening layers.  The finite-horizon construction itself, however, is defined by
-whatever qualified local $L_0$ is selected.
-
-\subsection{Terminal response and lookback-time evolution}
-\label{sec:time_adjoint_terminal}
-
-Introduce the lookback time
-\begin{equation}
- s\equiv \tau_T-\tau\ge0,
- \label{eq:rpf_lookback_time}
-\end{equation}
-so that increasing $s$ corresponds exactly to integrating backward in physical time.
-Let $\bm g_{\rm RE}$ denote the configured discrete terminal response.  The current
-implementation supports two choices:
-\begin{align}
- g_H(p) &= H(p-p_{\rm RE}),
- \label{eq:time_rpf_terminal_heaviside}\\
- g_\delta(p) &= \frac12\left[1+\tanh\left(\frac{p-p_{\rm RE}}{\delta p}\right)\right],
- \qquad \delta p=N_{\rm smooth}\,\Delta p,
- \label{eq:time_rpf_terminal_smooth}
-\end{align}
-where $N_{\rm smooth}>0$ is the configured smoothing width in radial cells.  The exact
-Heaviside is the literal finite-terminal-time runaway classification.  The smoothed choice
-instead defines a regularized terminal response: particles near $p_{\rm RE}$ receive a
-continuous terminal weight between zero and one.  It is therefore a deliberately modified
-terminal observable, not an algebraically identical representation of the sharp event.
-
-For the local forward cell-content system
-\begin{equation}
- \frac{d\bm N}{d\tau}=L_0\bm N,
- \label{eq:time_rpf_forward_local}
-\end{equation}
-the finite-horizon discrete adjoint response is defined by
-\begin{equation}
- \boxed{
- \frac{d\bm P}{ds}=L_0^T\bm P+\bm r_{\rm RE},
- \qquad
- \bm P(0)=\bm g_{\rm RE}.
- }
- \label{eq:time_rpf_semidiscrete}
-\end{equation}
-Equivalently, with
-\begin{equation}
- A\equiv -L_0^T,
- \label{eq:time_rpf_A_definition}
-\end{equation}
-Eq.~\eqref{eq:time_rpf_semidiscrete} is
-\begin{equation}
- \frac{d\bm P}{ds}=-A\bm P+\bm r_{\rm RE}.
- \label{eq:time_rpf_affine_A}
-\end{equation}
-Thus the same exact algebraic transpose already qualified for the steady RPF supplies
-the time-dependent spatial operator; there is no independently discretized adjoint PDE.
-
-The corresponding discrete forward--adjoint identity is, for arbitrary non-negative
-initial cell-content $\bm N^0$,
-\begin{equation}
- \boxed{
- \bm P(s)^T\bm N^0
- =\bm g_{\rm RE}^T\bm N(s)
- +\int_0^s \bm r_{\rm RE}^T\bm N(u)\,du.
- }
- \label{eq:time_rpf_finite_horizon_identity}
-\end{equation}
-For the exact Heaviside, the first term is the represented population above the terminal
-runaway threshold at the horizon.  For the smoothed response it is instead the corresponding
-smooth terminal-weight contraction.  The second term in either case is the population that
-has already escaped through the successful outer boundary.
-
-Because the finite-volume state stores exact cell content rather than point values, the
-configured terminal response is projected in the same $p^2\,dp$ phase-space measure.  For
-the exact Heaviside and radial cell $[p_{i-1/2},p_{i+1/2}]$,
-\begin{equation}
- g_{{\rm RE},ij}
- =\frac{\displaystyle
-   \int_{p_{i-1/2}}^{p_{i+1/2}}p^2H(p-p_{\rm RE})\,dp}
-  {\displaystyle
-   \int_{p_{i-1/2}}^{p_{i+1/2}}p^2\,dp}
- =
- \begin{cases}
-  0, & p_{i+1/2}\le p_{\rm RE},\\[3pt]
-  1, & p_{i-1/2}\ge p_{\rm RE},\\[3pt]
-  \dfrac{p_{i+1/2}^3-p_{\rm RE}^3}
-        {p_{i+1/2}^3-p_{i-1/2}^3},
-     & p_{i-1/2}<p_{\rm RE}<p_{i+1/2}.
- \end{cases}
- \label{eq:time_rpf_terminal_projection}
-\end{equation}
-Hence $p_{\rm RE}$ need not coincide with a radial face.  For the smoothed terminal response,
-\begin{equation}
- g_{{\rm RE},ij}^{(\delta)}
- =\frac{3}{p_{i+1/2}^3-p_{i-1/2}^3}
-   \int_{p_{i-1/2}}^{p_{i+1/2}}
-   p^2 g_\delta(p)\,dp,
- \label{eq:time_rpf_terminal_smooth_projection}
-\end{equation}
-which the standalone script evaluates with eight-point Gauss--Legendre quadrature in each
-radial cell.  Since $\delta p=N_{\rm smooth}\Delta p$, holding $N_{\rm smooth}$ fixed while
-refining the radial mesh makes the regularization width shrink toward the exact Heaviside.
-If a fixed physical smoothing width is desired instead, $N_{\rm smooth}$ must be adjusted as
-$\Delta p$ changes.
-
-If every surviving tagged electron eventually leaves the shifted finite domain, the
-transient terminal contribution decays as $s\rightarrow\infty$.  Equation
-\eqref{eq:time_rpf_semidiscrete} then gives
-\begin{equation}
- \boxed{A\bm P_\infty=\bm r_{\rm RE},}
- \label{eq:time_rpf_steady_limit}
-\end{equation}
-which is exactly the qualified steady system
-Eq.~\eqref{eq:rpf_discrete_linear_system}.  The terminal momentum therefore changes the
-finite-horizon transient but not the asymptotic steady first-passage probability, provided
-the terminal contribution has decayed.
-
-\subsection{Fixed-step TR--BDF2}
-\label{sec:time_adjoint_integrator}
-
-The finite-horizon adjoint uses standard fixed-step TR--BDF2 with
-\begin{equation}
- \gamma=2-\sqrt{2},
- \qquad
- h\equiv\Delta\tau>0,
- \label{eq:time_rpf_fixed_dt}
-\end{equation}
-where the user-selected $h$ is held constant throughout a run.  Changing $h$ is an explicit
-temporal-convergence study and never changes $L_0$, the collision coefficients, electric or
-radiation terms, success/failure boundary semantics, $\bm r_{\rm RE}$, or the configured
-terminal response.
-
-With $A=-L_0^T$, define
-\begin{equation}
- a\equiv\frac{\gamma}{2},
- \qquad
- \beta\equiv\frac{1-\gamma}{2-\gamma}.
- \label{eq:time_rpf_tr_ab}
-\end{equation}
-For $\gamma=2-\sqrt2$ these coefficients are identical,
-\begin{equation}
- \boxed{\beta=a=\frac{\gamma}{2}=1-\frac{1}{\sqrt2}.}
- \label{eq:time_rpf_tr_shared_coeff}
-\end{equation}
-The first, trapezoidal, substep advances from $s_n$ to $s_n+\gamma h$:
-\begin{equation}
- \boxed{
- (I+a h A)\bm P^{n+\gamma}
- =(I-a h A)\bm P^n+\gamma h\,\bm r_{\rm RE}.
- }
- \label{eq:time_rpf_tr_stage1}
-\end{equation}
-The second substep is the variable-step BDF2 update over the remaining interval,
-\begin{equation}
- \boxed{
- (I+\beta h A)\bm P^{n+1}
- =c_\gamma\bm P^{n+\gamma}+c_n\bm P^n
- +\beta h\,\bm r_{\rm RE},
- }
- \label{eq:time_rpf_tr_stage2}
-\end{equation}
-with
-\begin{equation}
- c_\gamma=\frac{1}{\gamma(2-\gamma)},
- \qquad
- c_n=-\frac{(1-\gamma)^2}{\gamma(2-\gamma)}.
- \label{eq:time_rpf_tr_coeffs}
-\end{equation}
-TR--BDF2 is second order, one-step, and L-stable.  It requires no backward-Euler startup and
-no multistep history.  It is not, however, assumed to be unconditionally positivity preserving;
-probability bounds and timestep convergence remain explicit qualification requirements.
-
-The choice $\gamma=2-\sqrt2$ is especially useful for the GPU sparse-direct implementation
-because Eqs.~\eqref{eq:time_rpf_tr_stage1} and \eqref{eq:time_rpf_tr_stage2} use the same
-implicit matrix,
-\begin{equation}
- \boxed{M=I+\frac{\gamma}{2}hA.}
- \label{eq:time_rpf_tr_matrix}
-\end{equation}
-The unified solver therefore executes the following sequence:
-\begin{enumerate}
- \item construct the fixed CSR graph and assemble $A=-L_0^T$ and the escape vectors;
- \item perform cuDSS symbolic analysis once, factorize $A$ once, solve
-       $A\bm P_{\rm ss}=\bm r_{\rm RE}$, and retain $\bm P_{\rm ss}$ on the GPU;
- \item if \texttt{[solve].mode=steady}, report and save the qualified steady solution and stop;
- \item if \texttt{[solve].mode=steady\_and\_time}, assemble $M$, numerically factorize it
-       once, and reuse that factorization for both substeps of every TR--BDF2 timestep.
-\end{enumerate}
-Thus a complete steady-plus-time calculation uses only two numerical factorizations---the
-steady matrix $A$ and the shared TR--BDF2 matrix $M$---regardless of the number of transient
-steps.  Each full timestep requires one GPU CSR product $A\bm P^n$, two right-hand-side
-constructions, and two cuDSS solves.  The transient states, direct steady target, and convergence
-reductions remain GPU resident.
-
-No state is clipped or projected to enforce probability bounds.  If a run leaves $[0,1]$ beyond
-the configured floating-point tolerance, or finite-horizon slices change materially when $h$ is
-reduced, the timestep is insufficiently resolved and the case must be rerun with a smaller value.
-The exact or smoothed terminal response can be used independently of this integrator choice.
-
-\subsection{Automatic approach to the steady RPF}
-\label{sec:time_adjoint_steady_stop}
-
-Before the transient march begins, the script directly solves the already-qualified discrete
-steady problem
-\begin{equation}
- \boxed{A\bm P_{\rm ss}=\bm r_{\rm RE}},
- \qquad A=-L_0^T,
- \label{eq:time_rpf_gpu_steady_target}
-\end{equation}
-with cuDSS and retains $\bm P_{\rm ss}$ on the GPU.  The finite-horizon adjoint is then
-advanced from the configured terminal response using Eqs.~\eqref{eq:time_rpf_tr_stage1} and
-\eqref{eq:time_rpf_tr_stage2}.  Since Eq.~\eqref{eq:time_rpf_gpu_steady_target} is the exact
-fixed point of both affine TR--BDF2 substeps, the transient must approach this same discrete state as
-lookback time increases.
-
-The successful outer-boundary set is determined directly from the radial characteristic,
-\begin{equation}
- \Gamma_{\rm RE}=\{\xi:U_p(p_{\max},\xi)>0\}.
-\end{equation}
-If this set is empty, then the discrete successful-escape vector vanishes,
-$\bm r_{\rm RE}=0$, and Eq.~\eqref{eq:time_rpf_gpu_steady_target} has the physical solution
-$\bm P_{\rm ss}=0$.  This is the below-threshold case: the finite-horizon terminal response is
-still initialized by Eq.~\eqref{eq:time_rpf_terminal_projection}, but it relaxes to zero as
-lookback time increases.
-
-At a fixed diagnostic cadence, convergence is measured directly against the resident steady
-RPF.  For a nonzero steady target,
-\begin{equation}
- \epsilon_2^n
- =\frac{\|\bm P^n-\bm P_{\rm ss}\|_2}{\|\bm P_{\rm ss}\|_2}.
- \label{eq:time_rpf_steady_match_l2}
-\end{equation}
-When $\Gamma_{\rm RE}=\varnothing$ and therefore $\bm P_{\rm ss}=0$, the relative norm above is
-undefined; the implementation instead measures the decay relative to the terminal-condition
-norm,
-\begin{equation}
- \epsilon_2^n
- =\frac{\|\bm P^n\|_2}{\|\bm P^{0}\|_2}.
- \label{eq:time_rpf_zero_target_decay_l2}
-\end{equation}
-In both cases the absolute maximum-norm diagnostic is
-\begin{equation}
- \epsilon_\infty^n=\|\bm P^n-\bm P_{\rm ss}\|_\infty .
- \label{eq:time_rpf_steady_match_linf}
-\end{equation}
-The integration stops only after both quantities are below their configured tolerances for
-several consecutive checks.  The difference and reductions are evaluated on the GPU; only the
-resulting scalar diagnostics are transferred to the host.  No repeated host-side sparse
-matrix-vector products or full-state transfers are required for steady detection.
-
-The affine residual
-\begin{equation}
- \bm R_{\rm ss}=A\bm P-\bm r_{\rm RE}
- \label{eq:time_rpf_steady_residual}
-\end{equation}
-is evaluated at the final transient state as an independent end-of-run qualification, but is
-not recomputed throughout the time loop.  The directly solved $\bm P_{\rm ss}$ is also written
-to output, so no additional steady solve is performed after the transient.
-
-The repeated TR--BDF2 cuDSS solves are enqueued on the same CUDA stream without a forced host
-synchronization after every solve.  Synchronization occurs at the periodic GPU convergence
-checks, requested snapshots, or final reporting.  This changes only execution overhead, not
-the fixed-step TR--BDF2 algorithm.
-
-\subsection{Required finite-horizon qualification}
-\label{sec:time_adjoint_qualification}
-
-The time-dependent adjoint is qualified only when the following tests are satisfied in
-addition to the steady RPF tests of Sec.~\ref{sec:rpf_qualification}:
-\begin{enumerate}
- \item \textbf{Terminal response.}  At $s=0$ the numerical state must equal the configured
-       finite-volume terminal response.  In exact-Heaviside mode this is
-       Eq.~\eqref{eq:time_rpf_terminal_projection}; in smoothed-Heaviside mode it is
-       Eq.~\eqref{eq:time_rpf_terminal_smooth_projection}.  The smoothed response is a
-       deliberately regularized terminal observable and must not be reported as the exact sharp
-       classification without taking the appropriate $\delta p\rightarrow0$ limit.
-
- \item \textbf{Forward--adjoint finite-horizon identity.}  For representative smooth and
-       localized non-negative forward states, direct propagation with the same local $L_0$ must
-       satisfy Eq.~\eqref{eq:time_rpf_finite_horizon_identity} at selected finite lookback times
-       after independent temporal refinement of the forward quadrature/integration.
-
- \item \textbf{Fixed-timestep convergence.}  The TR--BDF2 calculation must be repeated with
-       successively smaller $h$ and compared at common finite lookback times.  The RPF, the
-       location and width of its transition layer, and downstream contractions with representative
-       initial distributions must converge.  The exact Heaviside can produce a rapidly varying
-       initial transient, so no early-time asymptotic order is assumed without evidence.  A
-       smoothed terminal response does not remove the requirement for timestep refinement.
-
- \item \textbf{Probability range.}  Both TR--BDF2 substeps and the full-step trajectory must
-       remain in $[0,1]$ to the configured numerical tolerance.  If they do not, the timestep
-       must be reduced; clipping or projecting an RPF state is not permitted.
-
- \item \textbf{Steady limit.}  The direct GPU steady target
-       Eq.~\eqref{eq:time_rpf_gpu_steady_target} is computed before the transient march.  The
-       automatic stopping criteria Eqs.~\eqref{eq:time_rpf_steady_match_l2} and
-       \eqref{eq:time_rpf_steady_match_linf} must be satisfied for the configured number of
-       consecutive diagnostic checks.  The final affine residual
-       Eq.~\eqref{eq:time_rpf_steady_residual} must independently confirm the same limit.
-
- \item \textbf{Spatial, domain, and smoothing convergence.}  The temporal qualification does
-       not weaken the independent $N_p$, $N_\xi$, $p_{\min}$, and $p_{\max}$ convergence
-       requirements of the steady problem.  Finite-horizon slices must be compared on common
-       interior domains as these numerical axes are refined.  If a grid-scale smoothed terminal
-       response is used, its $\delta p=N_{\rm smooth}\Delta p$ dependence must be accounted for
-       explicitly when interpreting radial-grid convergence.
-\end{enumerate}
-
-\subsection{Distinction from a fully discrete reverse-mode adjoint}
-\label{sec:time_adjoint_discrete_scope}
-
-Equation~\eqref{eq:time_rpf_semidiscrete} is the physical time-dependent adjoint of the
-qualified semidiscrete local generator, and Eqs.~\eqref{eq:time_rpf_tr_stage1} and
-\eqref{eq:time_rpf_tr_stage2} are numerical integrators for that adjoint evolution.  This is
-not the same object as the exact reverse-mode transpose of a particular completed forward
-time-marching trajectory.  A fully discrete sensitivity adjoint would depend on the complete
-forward update map and the transpose of every discrete stage.  Such a reverse-mode construction
-may be useful for gradients of a specific discrete simulation, but it is not required for the
-finite-horizon RPF defined here and remains outside the present standalone research model.
-
-
-
-%===============================================================================
-\section{FV-assisted parametric PINN surrogate for the steady RPF}
-\label{sec:fv_assisted_pinn}
-
-The steady first-passage solver of Secs.~\ref{sec:steady_adjoint_physics}--
-\ref{sec:steady_adjoint_numerics} can also be used as a numerical teacher for a
-parametric physics-informed neural network.  The purpose of this surrogate is to
-represent the steady RPF continuously in phase space and over a prescribed plasma
-parameter domain without changing the physical definition of the RPF.  The present
-training model is restricted to the steady problem and to configurations with radial
-energy diffusion disabled.  The finite-horizon adjoint of Sec.~\ref{sec:time_dependent_adjoint}
-is not part of the present neural surrogate.
-
-The FV solutions used for supervision are numerical reference data, not exact continuum
-values.  They are admitted to a training data set only after the underlying FV adjoint
-configuration satisfies the qualification requirements of
-Sec.~\ref{sec:rpf_qualification}.  In particular, convergence of the sparse linear solve
-alone is insufficient: the radial and pitch grids, $p_{\min}$, $p_{\max}$, and the
-escape/balance identities remain independent qualification axes before FV fields are
-used as labels.
-
-\subsection{Parametric state and continuous mean-charge representation}
-\label{sec:pinn_parameters}
-
-The current training driver uses deuterium plus one configurable impurity species and
-parameterizes the prescribed plasma state by
-\begin{equation}
- \bm\lambda
- =\left(
-   \overline E,\,
-   T_e,\,
-   n_D,\,
-   n_I,\,
-   \overline Z_D,\,
-   \overline Z_I
-  \right),
- \qquad
- \overline E\equiv\frac{|E_\parallel|}{E_c}.
- \label{eq:pinn_parameter_vector}
-\end{equation}
-Together with phase space, the neural input therefore has eight components,
-\begin{equation}
- \bm z
- =\left(\widehat p,\widehat\xi,\widehat{\bm\lambda}\right)
- \in[0,1]^8.
- \label{eq:pinn_eight_dimensional_input}
-\end{equation}
-The momentum coordinate is logarithmically normalized,
-\begin{equation}
- \widehat p
- =\frac{\ln p-\ln p_{\min}}
-        {\ln p_{\max}-\ln p_{\min}},
- \qquad
- \widehat\xi=\frac{\xi+1}{2}.
- \label{eq:pinn_phase_normalization}
-\end{equation}
-For $\overline E$, $T_e$, and the species densities, the user selects either a linear or
-logarithmic map from $[0,1]$ to the configured physical interval.  Mean charge states
-are mapped linearly.  Thus the physical training domain is specified entirely in the
-configuration rather than hard-coded in the network.
-
-A noninteger mean charge is interpreted as a population mixture of the two neighboring
-integer charge states before any collision coefficient is evaluated.  For a species $s$
-with nuclear charge $Z_s$, density $n_s$, and prescribed mean charge
-$\overline Z_s\in[0,Z_s]$, define
-\begin{equation}
- w_{s,q}(\overline Z_s)
- =\max\!\left(0,1-|\overline Z_s-q|\right),
- \qquad q=0,\ldots,Z_s,
- \label{eq:pinn_charge_shape_function}
-\end{equation}
-and
-\begin{equation}
- n_{s,q}=n_s w_{s,q}(\overline Z_s).
- \label{eq:pinn_charge_population}
-\end{equation}
-The resulting populations satisfy
-\begin{equation}
- \sum_q n_{s,q}=n_s,
- \qquad
- \sum_q q\,n_{s,q}=n_s\overline Z_s.
-\end{equation}
-Consequently quasineutrality and the effective charge are evaluated as
-\begin{align}
- n_e&=\sum_{s,q}q\,n_{s,q}
-    =\sum_s n_s\overline Z_s,
- \label{eq:pinn_quasineutrality}\\
- Z_{\rm eff}&=\frac{1}{n_e}\sum_{s,q}q^2n_{s,q}.
- \label{eq:pinn_zeff}
-\end{align}
-The partial-screening sums are evaluated from the same resolved integer-state
-populations.  Integer values of $\overline Z_s$ therefore recover the corresponding
-single charge state exactly.  This population-first construction is shared by the FV
-label generator and the JAX PINN coefficients; interpolation of final collision
-coefficients is not used.
-
-\subsection{FV label generation and parameter-space split}
-\label{sec:pinn_fv_labels}
-
-Plasma parameter points are generated with a scrambled Sobol sequence in the six
-coordinates of Eq.~\eqref{eq:pinn_parameter_vector}.  The first configured subset is
-used to generate training labels and a disjoint set of complete plasma states is held
-out for validation.  For each parameter point $\bm\lambda_k$, the standalone adjoint
-solver constructs the same local forward FV generator and solves
-\begin{equation}
- A(\bm\lambda_k)\bm P_k^{\rm FV}
- =\bm r_{\rm RE}(\bm\lambda_k),
- \qquad
- A(\bm\lambda_k)=-L_0(\bm\lambda_k)^T.
- \label{eq:pinn_fv_teacher_solve}
-\end{equation}
-The sparse graph topology is reused across parameter cases when the FV grid is fixed.
-The resulting data set stores the parameter coordinates, FV cell-center coordinates,
-steady RPF fields, and qualification metadata.  A configurable subset of FV cells from
-each training parameter case may be used in the supervised loss; the held-out parameter
-cases are never used to update neural-network weights.
-
-FV data generation is deliberately outside JAX automatic differentiation.  The neural
-optimizer does not differentiate through matrix assembly, cuDSS factorization, or the
-steady FV solve.  The FV fields enter training only as fixed supervised targets.
-
-\subsection{Neural representation and steady adjoint residual}
-\label{sec:pinn_residual}
-
-Let $\mathcal N_{\bm\theta}(\bm z)$ denote the scalar output of the configurable fully
-connected network.  The probability is represented as
-\begin{equation}
- \boxed{
- P_{\bm\theta}(\bm z)
- =\tanh\!\left[
-   \widehat p^{\,2}\,
-   \mathcal N_{\bm\theta}(\bm z)^2
- \right].
- }
- \label{eq:pinn_output_transform}
-\end{equation}
-This transform hard-enforces
-$P_{\bm\theta}(p_{\min},\xi;\bm\lambda)=0$ and keeps the neural probability in
-$0\le P_{\bm\theta}<1$.  The successful part of the outer boundary is imposed separately
-through the loss below rather than hard-coded into the output transform.
-
-For the present energy-diffusion-free training configuration, the interior continuum
-steady-adjoint residual is
-\begin{align}
- \mathcal R_{\bm\theta}
- ={}&-U_p\frac{\partial P_{\bm\theta}}{\partial p}
- +(1-\xi^2)
-  \left(
-   \frac{\overline E}{p}-\frac{\alpha\xi}{\gamma}
-  \right)
-  \frac{\partial P_{\bm\theta}}{\partial\xi}
- \nonumber\\
- &-\frac{\nu_D}{2}
-  \frac{\partial}{\partial\xi}
-  \left[
-   (1-\xi^2)
-   \frac{\partial P_{\bm\theta}}{\partial\xi}
-  \right],
- \label{eq:pinn_steady_residual}
-\end{align}
-which is the corresponding form of
-$\mathcal L_0^\dagger P=0$ from
-Eq.~\eqref{eq:continuum_backward_operator}.  Equivalently,
-\begin{equation}
- \mathcal R_{\bm\theta}
- =a_p P_p+a_\xi P_\xi+a_{\xi\xi}P_{\xi\xi},
- \label{eq:pinn_residual_expanded}
-\end{equation}
-with
-\begin{align}
- a_p&=-U_p,\\
- a_\xi&=(1-\xi^2)
- \left(\frac{\overline E}{p}-\frac{\alpha\xi}{\gamma}\right)
- +\nu_D\xi,\\
- a_{\xi\xi}&=-\frac12\nu_D(1-\xi^2).
- \label{eq:pinn_residual_coefficients}
-\end{align}
-The collision and radiation coefficients are evaluated with exactly the same physical
-parameter mapping as the FV solver.  Because these coefficients do not depend on the
-network weights for a fixed collocation set, their normalized-coordinate forms are
-precomputed once per PDE sample set and reused throughout each optimizer block.  Neural
-derivatives are then the only repeated differential work in the PDE residual.
-
-The present surrogate does not apply an independent O--X threshold gate to the outer
-boundary.  Instead, the successful high-momentum subset is determined directly by the
-same radial drift used by the FV first-passage model,
-\begin{equation}
- \Gamma_{\rm RE}(\bm\lambda)
- =\{(p_{\max},\xi):U_p(p_{\max},\xi;\bm\lambda)>0\}.
- \label{eq:pinn_success_boundary}
-\end{equation}
-If this set is empty, the high-$p$ success loss vanishes naturally, consistent with the
-below-threshold FV problem.
-
-\subsection{Combined physics and FV-supervised objective}
-\label{sec:pinn_loss}
-
-The training objective combines the continuum adjoint equation, the successful outer
-boundary, and the FV teacher data,
-\begin{equation}
- \boxed{
- \mathcal L(\bm\theta)
- =w_{\rm PDE}\mathcal L_{\rm PDE}
- +w_{\rm BC}\mathcal L_{\rm BC}
- +w_{\rm FV}\mathcal L_{\rm FV}.
- }
- \label{eq:pinn_total_loss}
-\end{equation}
-For PDE collocation points $\bm z_i^{\rm PDE}$,
-\begin{equation}
- \mathcal L_{\rm PDE}
- =\frac{1}{N_{\rm PDE}}
-  \sum_{i=1}^{N_{\rm PDE}}
-  \mathcal R_{\bm\theta}(\bm z_i^{\rm PDE})^2.
- \label{eq:pinn_pde_loss}
-\end{equation}
-For high-$p$ boundary candidates $\bm z_i^{\rm BC}$, let
-$m_i=1$ when the point belongs to $\Gamma_{\rm RE}$ and $m_i=0$ otherwise.  Then
-\begin{equation}
- \mathcal L_{\rm BC}
- =\frac{\sum_i m_i
-   [P_{\bm\theta}(\bm z_i^{\rm BC})-1]^2}
-  {\max(\sum_i m_i,1)}.
- \label{eq:pinn_bc_loss}
-\end{equation}
-Finally, for supervised samples $(\bm z_j^{\rm FV},P_j^{\rm FV})$ drawn only from the FV
-training cases,
-\begin{equation}
- \mathcal L_{\rm FV}
- =\frac{1}{N_{\rm FV}}
-  \sum_{j=1}^{N_{\rm FV}}
-  [P_{\bm\theta}(\bm z_j^{\rm FV})-P_j^{\rm FV}]^2.
- \label{eq:pinn_fv_loss}
-\end{equation}
-The three weights and all sample counts are user-configurable.
-
-The PDE and boundary points are sampled in the full eight-dimensional normalized domain.
-All three terms are full-batch objectives.  For memory/performance tuning, each sum may
-be accumulated internally in fixed-size XLA chunks; this changes only the reduction
-order and does not create stochastic minibatches or alter the mathematical objective.
-Setting the corresponding chunk size to zero evaluates that complete term in one XLA
-call.
-
-\subsection{Adam--SSBroyden optimization protocol}
-\label{sec:pinn_optimization}
-
-The default optimization hierarchy follows the high-accuracy PINN strategy of an Adam
-warmup followed by self-scaled Broyden refinement
-\cite{Urban2025PINN}.  Adam operates on one fixed full training batch for a configured
-number of steps.  SSBroyden then minimizes the same composite objective in configurable
-blocks.  The default globalization is a strong-Wolfe backtracking line search, with
-alternative searches available as configuration choices.
-
-Each SSBroyden block is a new quasi-Newton solve and therefore begins with a fresh dense
-inverse-Hessian approximation.  Between blocks, the PDE and outer-boundary Sobol points
-may optionally be resampled while the FV supervised samples remain fixed.  This protocol
-is useful when a high-accuracy quasi-Newton method begins to overfit a finite collocation
-set: resampling changes the discrete approximation to the continuum physics loss, and
-resetting the inverse-Hessian approximation avoids carrying secant information from the
-old sampled objective into the new one.  Resampling is not mandatory; its cadence is a
-problem-dependent training parameter and may be disabled when a fixed collocation set is
-sufficiently dense.
-
-The configured SSBroyden relative/absolute tolerances control optimization of the sampled
-finite-dimensional loss only.  Reaching a tolerance near machine precision is not, by
-itself, evidence that the continuum PDE, the FV discretization, or the parametric
-surrogate has converged.
-
-\subsection{Validation and qualification of the surrogate}
-\label{sec:pinn_qualification}
-
-The FV-assisted PINN is considered qualified only through independent numerical checks,
-not through training loss alone.  The current minimum checks are:
-\begin{enumerate}
- \item \textbf{Coefficient parity.}  Before training, the JAX collision/radiation
-       coefficients and the FV solver coefficients must agree at representative states
-       to the expected floating-point tolerance, including the continuous mean-charge
-       mapping and quasineutral electron density.
-
- \item \textbf{FV-label qualification.}  Every family of FV labels must inherit the
-       transpose, escape, probability-bound, sparse-solve, grid, and radial-domain
-       qualification requirements of Sec.~\ref{sec:rpf_qualification}.  Expanding the
-       parametric or momentum domain does not relax those requirements.
-
- \item \textbf{Held-out parameter cases.}  Entire plasma parameter points are excluded
-       from training.  The trained network is evaluated on the complete FV grid for each
-       held-out case and compared using at least the relative $L^2$ error and maximum
-       absolute error.
-
- \item \textbf{Training-set refinement.}  The number and distribution of PDE points,
-       boundary points, FV parameter cases, and FV samples per case must be increased
-       until the quantities of interest and held-out errors are stable.  SSBroyden block
-       length and resampling cadence are training-method convergence axes rather than
-       physical model parameters.
-
- \item \textbf{Network-capacity refinement.}  Width/depth must be increased when the
-       supervised/FV error plateaus while the PDE and boundary losses are already small.
-       A low collocation loss must not be used to hide insufficient representation of the
-       FV solution manifold.
-\end{enumerate}
-
-The resulting neural model is therefore an accelerated representation of the qualified
-steady first-passage solution family.  It does not replace the FV solver as the numerical
-reference used to establish the model, and it does not alter the first-passage or
-large-angle-source semantics defined in the preceding sections.
+\section{Future bulk-plasma coupling}
+\label{sec:future_bulk_coupling}
+
+The standalone solver currently advances the kinetic distribution using a prescribed,
+constant plasma state.  A future coupled driver will evolve a bulk plasma model and
+exchange the quantities needed to update the kinetic coefficients and source terms.
+That extension must be defined explicitly rather than inferred from the present
+configuration file.
+
+At minimum, the coupled formulation must specify:
+\begin{itemize}
+  \item the bulk state variables exchanged with the kinetic solver, including density,
+        temperature, electric field, magnetic field, ionization state, and any source
+        or loss rates;
+  \item the coupling cadence and whether the bulk state is held fixed during a kinetic
+        step or iterated to a coupled time-level convergence;
+  \item the coefficient and Chiu--Harvey source update, including which GPU arrays are
+        updated in place and which require host preprocessing;
+  \item conservation equations for particle, energy, and charge exchange, with a
+        defined sign convention and diagnostics on both sides of the interface;
+  \item the sparse-topology policy: unchanged mesh topology may reuse cuDSS analysis
+        and use numerical refactorization, while changed sparsity requires rebuilding
+        and requalifying the CSR graph; and
+  \item restart data containing the bulk state, kinetic state, time level, configuration,
+        solver metadata, and enough provenance to reproduce the coupling decision.
+\end{itemize}
+
+The coupled implementation should first be qualified against a prescribed-state run
+using identical coefficients.  It should then demonstrate conservation and coefficient
+parity over representative bulk states, compare topology reuse with full rebuilds, and
+test timestep, mesh, and coupling-cadence refinement.  Until those checks are complete,
+the standalone forward solver remains the reference calculation.
 
 \begin{thebibliography}{99}
 
@@ -2878,21 +1740,10 @@ M.~Rahm, and T.~F{\"u}l{\"o}p,
 ``Generalized collision operator for fast electrons interacting with partially ionized impurities,''
 \emph{J. Plasma Phys.} \textbf{84}, 905840605 (2018).
 
-\bibitem{Hesslow2019Dreicer}
-L.~Hesslow, L.~Unnerfelt, O.~Vallhagen, O.~Embr\'eus, M.~Hoppe,
-G.~Papp, and T.~F{\"u}l{\"o}p,
-``Evaluation of the Dreicer runaway generation rate in the presence of high-$Z$ impurities using a neural network,''
-\emph{J. Plasma Phys.} \textbf{85}, 475850601 (2019).
-
 \bibitem{Andersson2001}
 F.~Andersson, P.~Helander, and L.-G.~Eriksson,
 ``Damping of relativistic electron beams by synchrotron radiation,''
 \emph{Phys. Plasmas} \textbf{8}, 5221 (2001).
-
-\bibitem{McDevitt2025Dynamics}
-C.~J. McDevitt, J.~S. Arnaud, and X.-Z. Tang,
-``A physics-constrained deep learning treatment of runaway electron dynamics,''
-\emph{Phys. Plasmas} \textbf{32}, 042503 (2025).
 
 \bibitem{Stahl2016}
 A.~Stahl, O.~Embr{\'e}us, G.~Papp, M.~Landreman, and T.~F{\"u}l{\"o}p,
@@ -2913,16 +1764,6 @@ R.~W. Harvey, V.~S. Chan, S.~C. Chiu, T.~E. Evans,
 M.~N. Rosenbluth, and D.~G. Whyte,
 \emph{Phys. Plasmas} \textbf{7}, 4590 (2000).
 
-
-\bibitem{Urban2025PINN}
-J.~F. Urb{\'a}n, P.~Stefanou, and J.~A. Pons,
-``Unveiling the optimization process of physics informed neural networks: How accurate and competitive can PINNs be?,''
-\emph{J. Comput. Phys.} \textbf{523}, 113656 (2025).
-
-\bibitem{Arnaud2025}
-J.~S. Arnaud, X.-Z. Tang, and C.~J. McDevitt,
-``A runaway electron avalanche surrogate for partially ionized plasmas,''
-\emph{Nucl. Fusion} \textbf{65}, 106013 (2025).
 
 \end{thebibliography}
 

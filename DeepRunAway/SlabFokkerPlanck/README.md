@@ -8,8 +8,8 @@ prescribed bulk-plasma coefficients to a bulk plasma model.
 
 - `forward_fv_solver.py`: Warp/cuDSS forward FV transient solver.
 - `forward_fv_solver.toml`: reproducible example configuration.
-- `kinetic_model_reorganized_v15_4_fv_assisted_pinn.tex`: scientific reference
-  retained from the model-development work.
+- `forward_fokker_planck_model.tex`: forward-only scientific and numerical
+  reference, including the future bulk-plasma coupling scope.
 - `docs/HIPERGATOR.md`: required Hipergator Slurm/GPU workflow.
 - `docs/CODEX_WORKFLOW.md`: compact Codex development and verification guide.
 
