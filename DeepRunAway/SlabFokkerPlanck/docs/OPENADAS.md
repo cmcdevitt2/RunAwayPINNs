@@ -47,6 +47,7 @@ coefficients remain in their native units (`cm^3 s^-1` for ACD/SCD and
 `W m^-3`.
 
 The current forward executable still uses its prescribed ion table. The
-OpenADAS reader is the data foundation for the pending collisional-radiative,
-bulk-energy, and induction coupling; it is not silently activated by the
-existing TOML case.
+OpenADAS reader and `bulk_plasma_model.py` now provide the tested host-side
+collisional-radiative, bulk-energy, and induction subsystem; they are not
+silently activated by the existing standalone TOML case. The GPU kinetic driver
+still needs the stage-iterated exchange with this subsystem.

@@ -33,8 +33,9 @@ compressed findings.
 ## Scope boundaries
 
 The stable executable is `forward_fv_solver.py`; the stable config is
-`forward_fv_solver.toml`. Preserve its FP64 Warp kernels, GPU CSR topology,
-cuDSS direct solve, transient scheme, boundary semantics, and output schema.
+`forward_fv_solver.toml`; the 0D coupling subsystem is `bulk_plasma_model.py`.
+Preserve the executable's FP64 Warp kernels, GPU CSR topology, cuDSS direct
+solve, transient scheme, boundary semantics, and output schema.
 The solver currently consumes prescribed plasma parameters. A coupling change
 must specify: exchanged state, update cadence, coefficient rebuild policy,
 topology reuse/refactorization policy, conservation exchange, and restart data.
