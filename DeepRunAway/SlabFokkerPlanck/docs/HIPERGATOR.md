@@ -1,15 +1,82 @@
-# Hipergator GPU batch execution
+# HiPerGator GPU batch execution
 
 Run the forward solver through Slurm on a GPU node. Login nodes are for
 editing, inspection, syntax/config checks, and submission only.
 
-## Environment and preflight
+## Shared GPU execution contract
 
-From `DeepRunAway/SlabFokkerPlanck`:
+Production kinetic execution is GPU-only. There is no CPU kinetic operator,
+CPU sparse solve, or CPU fallback. A failed GPU allocation or failed CUDA,
+Warp, or cuDSS preflight is a failed run that must be fixed, not bypassed.
+Warp, cuDSS, and any future JAX component must use the same allocated CUDA
+device. The solver uses FP64 Warp buffers and cuDSS direct solves.
+
+The supported project environment is `SlabFokkerPlanck/.venv`, addressed as
+`./.venv` from this directory. Activate it before Python checks and inside
+every batch script:
 
 ```bash
-# The shared project environment is DeepRunAway/.venv.
-source ../.venv/bin/activate
+source .venv/bin/activate
+```
+
+Keep generated data, logs, caches, and model data out of Git. Coupled runs
+require local, untracked OpenADAS bundles under `data/openadas/`; see
+[OPENADAS.md](OPENADAS.md).
+
+## Environment and dependency installation
+
+HiPerGator site settings are not portable to Perlmutter. Consult UF's
+[GPU resource](https://docs.rc.ufl.edu/resources/gpus/),
+[GPU access](https://docs.rc.ufl.edu/scheduler/gpu_access/), and
+[CUDA usage](https://docs.rc.ufl.edu/software/apps/cuda/usage/) pages before
+choosing a module or GPU type. The B200 partition requires CUDA 12.8.1 or
+newer when using a system CUDA installation.
+
+Use a fresh project-local environment. Do not copy a Perlmutter module path
+or a conda environment into HiPerGator:
+
+```bash
+module spider python
+module spider cuda
+module purge
+module load python/<site-approved-version>
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+```
+
+Preferred pip-managed CUDA 13 target, when the allocated B200 driver supports
+CUDA 13:
+
+```bash
+python -m pip install \
+  'nvmath-python[cu13]==1.0.0' \
+  'jax[cuda13]==0.11.1' \
+  'numpy==2.5.2' \
+  'scipy==1.18.1' \
+  'https://github.com/NVIDIA/warp/releases/download/v1.17.0/warp_lang-1.17.0+cu13-py3-none-manylinux_2_28_x86_64.whl#sha256=0dc6460a0fbb8cb68cc354c4775f5002347c14e419af0028d36cafb0f6eb41b6'
+python -m pip check
+```
+
+This project-local environment uses pip CUDA libraries. In the batch script,
+run `unset LD_LIBRARY_PATH` after module setup so a system CUDA module does not
+override them. If the B200 driver cannot run CUDA 13, use the UF-supported
+system CUDA module and a separate environment with `jax[cuda12-local]`, the
+PyPI Warp CUDA 12 package, and the matching nvmath system-CTK/cuDSS setup.
+Verify every CUDA-dependent package source; never mix CUDA 12 and CUDA 13
+packages or pip, conda, and system CUDA libraries without a compatibility test.
+
+The standalone forward solver requires Warp, NumPy, SciPy, and nvmath/cuDSS.
+JAX is not used by the standalone solver, but remains part of this validated
+environment for future JAX/bulk components; when present, require its GPU
+backend and the same visible CUDA device as Warp and cuDSS.
+
+## Preflight
+
+From `SlabFokkerPlanck`:
+
+```bash
+source .venv/bin/activate
 python -m py_compile forward_fv_solver.py
 python - <<'PY'
 import tomllib
@@ -34,25 +101,25 @@ print("nvmath:", nvmath.__version__)
 PY
 ```
 
-The forward solver is GPU-only. Keep FP64 enabled and do not hide a failed
-allocation with a CPU fallback. If a future bulk model uses JAX, additionally
-require `jax.default_backend() == "gpu"` and verify its CUDA device matches
-Warp's device.
+Keep FP64 enabled. If a future bulk model uses JAX, require
+`jax.default_backend() == "gpu"` and verify its device matches Warp and cuDSS.
 
 ## Example B200 job
 
 Create log directories before submission because Slurm opens output paths
-before the script body runs. Adjust partition/account/time to local site policy.
+before the script body runs. Adjust partition, account, time, and memory to
+local site policy.
 
 ```bash
 mkdir -p logs outputs
-cat > /tmp/slab-fp.slurm <<'SLURM'
+cat > hipergator_b200.sbatch <<'SLURM'
 #!/usr/bin/env bash
 #SBATCH --job-name=slab-fp
 #SBATCH --partition=hpg-b200
 #SBATCH --constraint=b200
+#SBATCH --account=<UFRC_GPU_ACCOUNT>
 #SBATCH --gres=gpu:b200:1
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=14
 #SBATCH --mem=64G
 #SBATCH --time=02:00:00
 #SBATCH --output=logs/%x-%j.out
@@ -60,10 +127,9 @@ cat > /tmp/slab-fp.slurm <<'SLURM'
 
 set -euo pipefail
 cd "$SLURM_SUBMIT_DIR"
-# From SlabFokkerPlanck, ../.venv is DeepRunAway/.venv.
-source ../.venv/bin/activate
+source .venv/bin/activate
+unset LD_LIBRARY_PATH
 export PYTHONUNBUFFERED=1
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 nvidia-smi
 python - <<'PY'
@@ -76,9 +142,10 @@ print("Warp:", wp.get_devices())
 print("nvmath:", nvmath.__version__)
 PY
 
-python forward_fv_solver.py --config forward_fv_solver.toml
+srun --ntasks=1 --cpus-per-task=14 --gpus-per-task=1 \
+    --cpu-bind=cores python forward_fv_solver.py --config forward_fv_solver.toml
 SLURM
-sbatch /tmp/slab-fp.slurm
+sbatch hipergator_b200.sbatch
 ```
 
 Use a site-approved account/QOS if required. Keep the batch script outside Git

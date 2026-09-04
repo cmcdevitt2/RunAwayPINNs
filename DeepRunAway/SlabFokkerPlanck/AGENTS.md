@@ -10,7 +10,8 @@ GPU residency, cuDSS use, and reproducibility as first-class requirements.
 ## Operating mode
 
 - Read `README.md`, then all documentation in `docs/` when that directory
-  exists—especially `docs/CODEX_WORKFLOW.md` and `docs/HIPERGATOR.md`—before
+  exists—especially `docs/CODEX_WORKFLOW.md`, `docs/HIPERGATOR.md`, and
+  `docs/PERLMUTTER.md`—before
   reading the relevant TOML, code, or targeted symbols.
 - Keep changes narrow. Do not add dependencies, abstractions, or output schemas
   without a concrete requirement.
@@ -48,10 +49,13 @@ edit ownership.
 - `CudssDirectSystem.refactorize()` reuses analyzed topology only; it is not a
   substitute for proving coefficient-update correctness or conservation.
 - Keep Warp, cuDSS, and any future JAX component on the same CUDA device.
-- Production runs require Slurm GPU batch jobs on Hipergator. Login nodes are for
-  inspection, syntax/config checks, and submission. Never accept CPU fallback.
-- Use `DeepRunAway/.venv`; from this directory its relative path is `../.venv`.
-  Activate it for all Python checks and inside every GPU batch script.
+- Production runs require Slurm GPU batch jobs on a supported HPC cluster.
+  Login nodes are for inspection, syntax/config checks, and submission. Never
+  accept CPU fallback. Use the matching `docs/PERLMUTTER.md` or
+  `docs/HIPERGATOR.md` guide for site-specific commands.
+- Use the local `SlabFokkerPlanck/.venv`; from this directory its path is
+  `./.venv`. Activate it for all Python checks and inside every GPU batch
+  script.
 - Keep generated data, logs, plots, caches, and scratch outputs out of Git.
 
 ## Verification ladder

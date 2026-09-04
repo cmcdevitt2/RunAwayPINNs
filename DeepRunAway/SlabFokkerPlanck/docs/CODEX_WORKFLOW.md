@@ -51,13 +51,16 @@ ordering and memory planning, then add forward-specific tests.
 
 ## HPC and verification
 
-Follow `docs/HIPERGATOR.md`. Production execution is a Slurm GPU batch job;
-login-node execution is limited to static checks and submission. Begin with a
-small case and record GPU, environment, Git commit, TOML, job ID, residuals,
-state bounds, and peak memory before scaling.
-The supported Python environment is `DeepRunAway/.venv`, which is `../.venv`
-when the working directory is `DeepRunAway/SlabFokkerPlanck`; activate it
-before Python checks and inside every submitted batch script.
+Follow `docs/PERLMUTTER.md` or `docs/HIPERGATOR.md` for the site-specific HPC
+guide. Keep project code and shared workflow rules cluster-agnostic.
+Production execution is a Slurm GPU batch job; login-node execution is limited
+to static checks and submission. Begin with a small case and record GPU,
+environment, Git commit, TOML, job ID, residuals, state bounds, and peak memory
+before scaling.
+The supported Python environment is `SlabFokkerPlanck/.venv`, addressed as
+`./.venv` from `DeepRunAway/SlabFokkerPlanck`; activate it before Python checks
+and inside every submitted batch script. Cluster guides define module and CUDA
+package choices; keep CUDA 12 and CUDA 13 package families separate.
 
 For source/config/docs changes, run syntax, TOML, import/config, and `--help`
 checks. For numerical changes, add a small GPU run and the relevant conservation,

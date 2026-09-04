@@ -13,7 +13,7 @@ untracked directory and writes a SHA-256 manifest containing the source URL,
 retrieval time, file path, and OpenADAS terms URL:
 
 ```bash
-source ../.venv/bin/activate
+source .venv/bin/activate
 python scripts/fetch_openadas.py \
   --element Ar --year 89 \
   --data-dir data/openadas/Ar89
@@ -25,7 +25,7 @@ The `H89` bundle is the ADF11 data used for deuterium. These files remain
 ignored by Git. Recreate the neon and deuterium-input bundles with:
 
 ```bash
-source ../.venv/bin/activate
+source .venv/bin/activate
 python scripts/fetch_openadas.py --element Ne --year 89 --data-dir data/openadas/Ne89
 python scripts/fetch_openadas.py --element H --year 89 --data-dir data/openadas/H89
 ```
