@@ -7,14 +7,19 @@ steady 0D--2P relativistic runaway-electron first-passage problem.
 
 - `adjoint_fv_solver.py`: Warp/cuDSS finite-volume adjoint/RPF solver.
 - `fv_robustness_campaign.py`: B200 parameter-sweep and grid/domain-refinement FV qualification driver.
+- `perlmutter_a100.sbatch`: Perlmutter A100 FV/PINN/campaign batch template.
 - `fv_theta_resolution.toml`, `fv_theta_resolution_b200.sbatch`: focused angular-grid resolution study.
 - `pinn_training.py`: JAX PINN trainer using FV-generated labels.
+- `pinn_training_smoke.toml`: persistent one-case GPU execution smoke test;
+  not a training qualification.
 - `adjoint_fv_solver.toml`: small direct-solver example case.
 - `fv_robustness_campaign.toml`: first-pass domain-wide FV robustness campaign.
 - `fv_robustness_refinement.toml`: higher-resolution follow-up campaign.
 - `pinn_training.toml`: training configuration and parameter domain.
 - `rpf_fv_pinn_scientific_reference_v1.tex`: scientific and numerical reference.
-- `docs/HIPERGATOR.md`: required Hipergator GPU batch-job workflow.
+- `docs/HIPERGATOR.md`: Hipergator B200 GPU batch-job workflow.
+- `docs/PERLMUTTER.md`: NERSC Perlmutter A100 GPU batch-job workflow.
+- `docs/DEPENDENCIES.md`: shared cluster-agnostic Python/GPU dependencies.
 
 The solver is a prescribed-parameter, spatially homogeneous test-particle model;
 it is not a self-consistent plasma evolution code. Preserve the physical and
@@ -36,17 +41,21 @@ GPU-resident Warp/cuDSS path.
 
 ## Quick start on an allocated GPU node
 
-Run from this directory with the repository's neighboring environment:
+Run from this directory on an allocated GPU node after following the selected
+cluster guide and [`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md):
 
 ```bash
-source ../.venv/bin/activate
 python adjoint_fv_solver.py --config adjoint_fv_solver.toml
 python pinn_training.py --config pinn_training.toml
 ```
 
 These commands are intended for an allocated GPU node. Do not run production
-cases on a login node. See `docs/HIPERGATOR.md` for Slurm commands, resource
+cases on a login node. See `docs/HIPERGATOR.md` for Hipergator B200 or
+`docs/PERLMUTTER.md` for NERSC Perlmutter A100 Slurm commands, resource
 requests, environment setup, logging, and validation checks.
+
+For a short Perlmutter execution check, use persistent
+`pinn_training_smoke.toml` through `docs/PERLMUTTER.md`.
 
 Training with `generate = true` writes the FV dataset and model outputs under
 the configured paths. Those generated files are ignored by Git and should be

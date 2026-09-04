@@ -1,193 +1,184 @@
-# Hipergator GPU batch execution
+# HiPerGator B200 workflow
 
-Run both programs through Slurm batch jobs on Hipergator. Login nodes are for
-editing, small syntax checks, and job submission only; they are not a valid
-place for Warp/cuDSS or JAX GPU production runs.
+This page contains HiPerGator-only resource and module guidance. It does not
+apply to NERSC Perlmutter. Use [`PERLMUTTER.md`](PERLMUTTER.md) for Perlmutter
+A100 jobs. Python solver code remains cluster-agnostic.
 
-The production target is an NVIDIA B200 GPU. Request the dedicated
-`hpg-b200` partition and a typed `gpu:b200:1` GRES in every batch script
-(subject to the project's Slurm account/QOS access); retain the `b200`
-constraint as an additional allocation check when adapting the templates below.
+Install shared dependencies from [`DEPENDENCIES.md`](DEPENDENCIES.md). Use
+direct VCS installation for the SSBFGS Optimistix branch; do not keep an
+Optimistix source repository as an environment dependency.
 
-## Prepare environment
+## Login node and environment
 
-From the renamed `SlabRpfPinn` directory, use the neighboring environment:
+Use HiPerGator login nodes for editing, repository inspection, small syntax or
+TOML checks, environment installation, and job submission. Run Warp, JAX,
+cuDSS, FV, and PINN workloads only through Slurm.
+
+From this directory, use the project environment or a validated replacement:
 
 ```bash
 cd /path/to/DeepRunAway/SlabRpfPinn
+module spider python
+module spider cuda
+module spider nvmath
+module spider cudss
 source ../.venv/bin/activate
-python - <<'PY'
-import jax
-import warp
-import nvmath
-print("JAX:", jax.default_backend(), jax.devices())
-print("Warp:", warp.get_devices())
-print("nvmath:", nvmath.__version__)
-PY
 ```
 
-JAX may report its GPU backend as `gpu`; confirm `jax.devices()` includes a CUDA
-device, and Warp must list at least one CUDA device. If either check reports
-CPU-only execution, stop the job and inspect
-the allocated GPU, modules, environment, and CUDA library paths.
+Select Python/CUDA modules supported by HiPerGator at submission time. Do not
+copy Perlmutter `module purge`, CUDA 13, or A100 assumptions without checking
+the HiPerGator driver and module stack. Follow the CUDA profile in
+[`DEPENDENCIES.md`](DEPENDENCIES.md) that matches `nvidia-smi`.
 
-## Adjoint FV job
+## B200 resource request
 
-Save a site-specific batch script outside Git or adapt this template:
+Existing HiPerGator B200 scripts use `hpg-b200`, `b200`, and
+`gpu:b200:1`. Confirm current names with `sinfo` before submission. Replace
+both placeholders below with values supplied by HiPerGator project settings;
+do not guess account or QOS:
+
+```bash
+sinfo
+sbatch --account=<HIPERGATOR_ACCOUNT> --qos=<HIPERGATOR_QOS> \
+  fv_robustness_b200.sbatch
+```
+
+For ordinary one-GPU studies, retain 28 total host threads:
+
+```bash
+export OMP_NUM_THREADS=28
+export MKL_NUM_THREADS=28
+export OPENBLAS_NUM_THREADS=28
+export NUMEXPR_NUM_THREADS=28
+```
+
+Use one serial batch job to cycle cases and meshes. Do not submit one job per
+case unless a separate campaign design authorizes it.
+
+## Direct FV or PINN batch template
+
+Save this template as `hipergator_b200.sbatch` in an approved persistent
+project/scratch directory, replace
+the account, QOS, and time placeholders, then submit it. Do not save a script
+under `/tmp` or use temporary directories for inputs or outputs.
 
 ```bash
 #!/usr/bin/env bash
-#SBATCH --job-name=slab-rpf-fv
+#SBATCH --job-name=slab-rpf-hpg
+#SBATCH --account=<HIPERGATOR_ACCOUNT>
+#SBATCH --qos=<HIPERGATOR_QOS>
 #SBATCH --partition=hpg-b200
 #SBATCH --constraint=b200
 #SBATCH --gres=gpu:b200:1
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
 #SBATCH --cpus-per-task=28
-#SBATCH --mem=64G
-#SBATCH --time=02:00:00
-#SBATCH --output=logs/%x-%j.out
-#SBATCH --error=logs/%x-%j.err
-
-set -euo pipefail
-cd "$SLURM_SUBMIT_DIR"
-mkdir -p logs outputs
-source ../.venv/bin/activate
-
-export PYTHONUNBUFFERED=1
-export XLA_PYTHON_CLIENT_PREALLOCATE=false
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-
-python - <<'PY'
-import jax
-import warp
-if jax.default_backend() != "gpu":
-    raise SystemExit(f"JAX GPU backend required, got {jax.default_backend()!r}")
-if not any(getattr(device, "is_cuda", False) for device in warp.get_devices()):
-    raise SystemExit(f"Warp CUDA device required, got {warp.get_devices()!r}")
-print("JAX:", jax.default_backend(), jax.devices())
-print("Warp:", warp.get_devices())
-PY
-
-python adjoint_fv_solver.py --config adjoint_fv_solver.toml
-```
-
-Submit and monitor:
-
-```bash
-mkdir -p logs outputs
-sbatch fv.slurm
-squeue -u "$USER"
-tail -f logs/slab-rpf-fv-<JOBID>.out
-sacct -j <JOBID> --format=JobID,State,ExitCode,Elapsed,MaxRSS
-```
-
-Use a separate output path per case. Do not let concurrent jobs overwrite the
-same `.npz` or plot files.
-
-## FV robustness campaign
-
-Before generating PINN labels, run the committed B200 campaign script. It
-samples complete plasma states across the configured PINN domain, repeats them
-on the configured grid/domain panels, and writes a machine-readable report of
-per-case solver diagnostics plus common-grid RPF differences. It deliberately
-does not turn a chosen numerical threshold into an automatic label-promotion
-decision.
-
-```bash
-source ../.venv/bin/activate
-python fv_robustness_campaign.py --config fv_robustness_campaign.toml --dry-run
-mkdir -p logs outputs/fv_robustness
-sbatch fv_robustness_b200.sbatch
-```
-
-The script requests `hpg-b200`, `gpu:b200:1`, and `--constraint=b200`, then
-rejects an allocation whose GPU name is not B200. Use `sacct` after completion and retain
-`outputs/fv_robustness/fv_robustness_summary.json`, the TOML, and Slurm logs.
-Review the failed-case list, residual/identity diagnostics, probability bounds,
-and RPF differences from radial, pitch, lower-domain, and upper-domain panels
-before increasing sampling coverage or accepting FV labels.
-
-The higher-resolution follow-up retains the first report in a distinct output
-directory and can be submitted with:
-
-```bash
-mkdir -p logs outputs/fv_robustness/refinement_1024x512
-sbatch fv_robustness_b200.sbatch fv_robustness_refinement.toml
-```
-
-## PINN training job
-
-PINN label generation can solve many FV cases and may require substantial GPU
-memory, host memory, and wall time. Submit it as its own job:
-
-```bash
-#!/usr/bin/env bash
-#SBATCH --job-name=slab-rpf-pinn
-#SBATCH --partition=hpg-b200
-#SBATCH --constraint=b200
-#SBATCH --gres=gpu:b200:1
-#SBATCH --cpus-per-task=8
 #SBATCH --mem=128G
-#SBATCH --time=24:00:00
+#SBATCH --time=<HH:MM:SS>
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
 
 set -euo pipefail
 cd "$SLURM_SUBMIT_DIR"
-mkdir -p logs data outputs
 source ../.venv/bin/activate
 
 export PYTHONUNBUFFERED=1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export OMP_NUM_THREADS=28
+export MKL_NUM_THREADS=28
+export OPENBLAS_NUM_THREADS=28
+export NUMEXPR_NUM_THREADS=28
+
+gpu_name="$(nvidia-smi --query-gpu=name --format=csv,noheader | sed -n '1p')"
+if [[ "$gpu_name" != *"B200"* ]]; then
+    echo "HiPerGator B200 allocation required, got: $gpu_name" >&2
+    exit 1
+fi
 
 python - <<'PY'
+import importlib.metadata as metadata
 import jax
+import nvmath
 import warp
+from nvmath.bindings import cudss
+
+print("JAX:", metadata.version("jax"), jax.default_backend(), jax.devices())
+print("Warp:", metadata.version("warp-lang"), warp.get_devices())
+print("nvmath-python:", metadata.version("nvmath-python"))
+for package_name in ("nvidia-cudss-cu13", "nvidia-cudss-cu12"):
+    try:
+        print("cuDSS package:", package_name, metadata.version(package_name))
+        break
+    except metadata.PackageNotFoundError:
+        pass
+else:
+    raise SystemExit("cuDSS runtime package required")
 if jax.default_backend() != "gpu":
-    raise SystemExit(f"JAX GPU backend required, got {jax.default_backend()!r}")
-if not any(getattr(device, "is_cuda", False) for device in warp.get_devices()):
-    raise SystemExit(f"Warp CUDA device required, got {warp.get_devices()!r}")
-print("JAX:", jax.default_backend(), jax.devices())
-print("Warp:", warp.get_devices())
+    raise SystemExit("JAX GPU backend required")
+if not any(getattr(d, "is_cuda", False) for d in warp.get_devices()):
+    raise SystemExit("Warp CUDA device required")
+major = cudss.get_property(nvmath.LibraryPropertyType.MAJOR_VERSION)
+minor = cudss.get_property(nvmath.LibraryPropertyType.MINOR_VERSION)
+if (major, minor) != (0, 8):
+    raise SystemExit(f"cuDSS 0.8 required, got {major}.{minor}")
 PY
 
-python pinn_training.py --config pinn_training.toml
+MODE="${MODE:-fv}"
+CONFIG="${CONFIG:-adjoint_fv_solver.toml}"
+case "$MODE" in
+    fv)       PROGRAM=(adjoint_fv_solver.py) ;;
+    pinn)     PROGRAM=(pinn_training.py) ;;
+    campaign) PROGRAM=(fv_robustness_campaign.py) ;;
+    *)        echo "MODE must be fv, pinn, or campaign" >&2; exit 2 ;;
+esac
+srun --ntasks=1 --cpus-per-task=28 --gpus-per-task=1 \
+    --cpu-bind=cores python "${PROGRAM[@]}" --config "$CONFIG"
 ```
 
-Create the Slurm log directories before submission because Slurm opens output
-paths before executing the script:
+Create log directories before submission because Slurm opens output paths
+before executing the script:
 
 ```bash
-mkdir -p logs data outputs
-sbatch pinn.slurm
+mkdir -p logs outputs
+MODE=fv CONFIG=adjoint_fv_solver.toml sbatch hpg_b200.sbatch
+MODE=pinn CONFIG=pinn_training_smoke.toml sbatch hpg_b200.sbatch
 ```
 
-Start with reduced `Np`, `Nxi`, case counts, collocation counts, and optimizer
-steps. Increase them only after one complete batch run passes the backend and
-coefficient-parity checks. Keep generated dataset/model paths on scratch or a
-project data area, not in Git.
+For committed campaign scripts, submit exact script name and pass account/QOS
+overrides explicitly:
 
-## Reproducibility and diagnostics
+```bash
+mkdir -p logs outputs/fv_robustness
+python fv_robustness_campaign.py --config fv_robustness_campaign.toml --dry-run
+sbatch --account=<HIPERGATOR_ACCOUNT> --qos=<HIPERGATOR_QOS> \
+  fv_robustness_b200.sbatch
+```
 
-- Record Slurm job ID, Git commit, Python environment, GPU model, and TOML file.
-- Keep stdout and stderr logs with each result directory.
-- Verify JAX reports backend `gpu` with CUDA devices. Standalone FV logs should
-  contain `execution=gpu-warp-cudss`; PINN logs should contain its JAX and Warp
-  device probes.
-- Check cuDSS residuals, transpose checks, escape identity, and probability
-  bounds before treating an FV result as a training label.
-- For PINN runs, retain the copied TOML, training history, summary, and dataset
-  metadata together.
-- Use `sacct` after completion; `squeue` alone does not report failed jobs.
+## Interactive smoke test
 
-## Common failure modes
+Use HiPerGator interactive GPU mechanism only if current scheduler policy
+permits it. Request one B200, then run same preflight and persistent
+`pinn_training_smoke.toml` configuration with `srun`. Keep output in
+`outputs/`, `logs/`, or approved `$SCRATCH`/project storage.
 
-`Invalid device identifier: cuda:0` means the script is running without a valid
-GPU allocation or visible CUDA device. Resubmit with a GPU resource request.
+## Monitoring and results
 
-`FileNotFoundError` for a TOML file means the job started in the wrong
-directory or the explicit `--config` path is wrong. Always use
-`cd "$SLURM_SUBMIT_DIR"` and pass the config explicitly.
+```bash
+squeue -u "$USER"
+squeue -j <JOBID>
+tail -f logs/<job-name>-<JOBID>.out
+sacct -j <JOBID> \
+  --format=JobID,JobName,Partition,Account,QOS,AllocTRES,State,ExitCode,Elapsed,MaxRSS
+```
 
-Do not bypass a failed GPU check by setting `JAX_PLATFORMS=cpu`; that only hides
-the allocation/configuration problem and cannot run the cuDSS FV path.
+Record job ID, effective account/QOS/partition, GPU name, driver, Python
+package versions, Git commit, TOML, residuals, probability bounds, and peak
+memory. Retain stdout/stderr with outputs. Never use `/tmp`, `$TMPDIR`,
+`mktemp`, or node-local temporary directories for runtime files.
+
+## Stop conditions
+
+Stop when GPU, Warp, JAX, or cuDSS preflight fails. Do not set
+`JAX_PLATFORMS=cpu` and do not substitute a CPU sparse solver. Stop when B200
+memory or cuDSS workspace is insufficient; qualify a smaller grid or use an
+approved resource option without changing solver mathematics.

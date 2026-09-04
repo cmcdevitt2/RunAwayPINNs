@@ -60,17 +60,33 @@ separate task and a qualification plan.
 
 ## HPC execution
 
-Use `docs/HIPERGATOR.md` for batch templates. Before submitting:
+Use `docs/HIPERGATOR.md` only for Hipergator B200 jobs and
+`docs/PERLMUTTER.md` for NERSC Perlmutter A100 jobs. Their Slurm resource
+syntax is not interchangeable. Before submitting:
+
+Use `docs/DEPENDENCIES.md` for shared Python/GPU installation. Keep solver
+code cluster-agnostic; keep site-specific resource and module choices in site
+documentation. Do not install VCS dependencies as persistent source
+repositories.
 
 ```bash
 mkdir -p logs data outputs
-sbatch <job-script>
+sbatch <cluster-specific-job-script>
 ```
 
-Inside the job, use `cd "$SLURM_SUBMIT_DIR"`, activate `../.venv`, disable JAX
-preallocation, and print JAX and Warp device information. JAX may report its GPU
+Inside the job, use `cd "$SLURM_SUBMIT_DIR"`, activate `../.venv` (or the
+validated site-specific replacement), disable JAX preallocation, and print
+JAX, Warp, nvmath, and cuDSS device/version information. JAX may report its GPU
 backend as `gpu`; confirm CUDA execution through `jax.devices()` and Warp's
 device list. Never interpret a login-node CPU result as a solver qualification.
+Perlmutter currently documents A100 GPUs and `--constraint=gpu` with explicit
+`--gpus`/`--gpus-per-*` requests; Hipergator B200 directives must not be copied
+there.
+
+Use the persistent `pinn_training_smoke.toml` for an execution-path check.
+Keep all inputs, logs, datasets, models, plots, and caches in the checkout's
+ignored paths or `$PSCRATCH`; do not use `/tmp`, `$TMPDIR`, `mktemp`, or
+node-local temporary directories.
 
 Start with a reduced grid, case count, collocation set, and optimizer budget.
 Scale only after one complete batch job passes backend, parity, residual, and

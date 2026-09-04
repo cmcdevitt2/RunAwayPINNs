@@ -1,0 +1,68 @@
+# Persistent GPU execution smoke test. This is not a training qualification.
+
+[fv]
+solver_script = "adjoint_fv_solver.py"
+generate = true
+dataset_file = "outputs/pinn_training_smoke_dataset.npz"
+parameter_seed = 1234
+n_train_cases = 1
+n_validation_cases = 1
+Np = 32
+Nxi = 16
+pmin = 0.001
+pmax = 50.0
+B_T = 5.3
+device = "cuda:0"
+energy_diffusion = false
+
+[domain]
+e_parallel_min = 1.0
+e_parallel_max = 1000.0
+e_parallel_sampling = "log"
+te_min_ev = 1.0
+te_max_ev = 100.0
+te_sampling = "log"
+nD_min_m3 = 1.0e20
+nD_max_m3 = 1.0e22
+nD_sampling = "log"
+nImp_min_m3 = 1.0e16
+nImp_max_m3 = 1.0e22
+nImp_sampling = "log"
+zDavg_min = 0.01
+zDavg_max = 1.0
+zImpavg_min = 0.01
+zImpavg_max = 10.0
+impurity_name = "Ne"
+impurity_Z = 10
+
+[training]
+seed = 4321
+sampling_seed = 5678
+width = 8
+depth = 2
+n_pde = 32
+n_bc = 16
+fv_points_per_case = 16
+interior_eps = 1.0e-6
+pde_chunk = 16
+bc_chunk = 16
+fv_chunk = 16
+validation_chunk = 16
+adam_steps = 1
+adam_block_steps = 1
+adam_lr = 2.0e-3
+ssb_blocks = 1
+ssb_block_iters = 1
+ssb_resample_every_blocks = 0
+ssb_search = "wolfe"
+ssb_rtol = 1.0e-8
+ssb_atol = 1.0e-8
+
+[loss]
+w_pde = 1.0
+w_bc = 1.0
+w_fv = 1.0
+residual_scale = 1.0
+
+[output]
+directory = "outputs/pinn_training_smoke"
