@@ -53,6 +53,54 @@ class HostFoundationTests(unittest.TestCase):
         self.assertGreaterEqual(float(state.min()), 0.0)
         self.assertAlmostEqual(float(state.sum()), 1.0, places=13)
 
+    def test_state_resolved_screening_uses_charge_populations(self):
+        common = dict(
+            name="Ne", Z=2, Z0=0, density_m3=2.0e20,
+            I_eV=20.0, a_bar=0.1,
+            I_eV_by_charge=(20.0, 40.0, 1.0),
+            a_bar_by_charge=(0.1, 0.2, 1.0),
+        )
+        resolved = solver.IonSpecies(
+            **common, charge_populations_m3=(0.0, 1.0e20, 1.0e20)
+        )
+        without_bare = solver.IonSpecies(
+            **{**common, "density_m3": 1.0e20},
+            charge_populations_m3=(0.0, 1.0e20, 0.0),
+        )
+        cfg_resolved = solver.SolverConfig(ne_m3=1.0e20, ions=(resolved,))
+        cfg_without_bare = solver.SolverConfig(ne_m3=1.0e20, ions=(without_bare,))
+        solver.validate_config(cfg_resolved)
+        solver.validate_config(cfg_without_bare)
+        p = np.asarray([0.3, 1.0, 3.0])
+        h_resolved, g_resolved = solver.screening_h_g(
+            p, cfg_resolved, solver.derive_physics(cfg_resolved)
+        )
+        h_without_bare, g_without_bare = solver.screening_h_g(
+            p, cfg_without_bare, solver.derive_physics(cfg_without_bare)
+        )
+        np.testing.assert_allclose(h_resolved, h_without_bare)
+        np.testing.assert_allclose(g_resolved, g_without_bare)
+
+    def test_state_resolved_screening_changes_with_bound_charge_state(self):
+        ion_q0 = solver.IonSpecies(
+            name="Ne", Z=2, Z0=0, density_m3=1.0e20,
+            I_eV=20.0, a_bar=0.1,
+            charge_populations_m3=(1.0e20, 0.0, 0.0),
+            I_eV_by_charge=(20.0, 40.0, 1.0),
+            a_bar_by_charge=(0.1, 0.2, 1.0),
+        )
+        ion_q1 = solver.IonSpecies(
+            name="Ne", Z=2, Z0=1, density_m3=1.0e20,
+            I_eV=40.0, a_bar=0.2,
+        )
+        cfg_q0 = solver.SolverConfig(ne_m3=1.0e20, ions=(ion_q0,))
+        cfg_q1 = solver.SolverConfig(ne_m3=1.0e20, ions=(ion_q1,))
+        p = np.asarray([0.3, 1.0, 3.0])
+        h_q0, g_q0 = solver.screening_h_g(p, cfg_q0, solver.derive_physics(cfg_q0))
+        h_q1, g_q1 = solver.screening_h_g(p, cfg_q1, solver.derive_physics(cfg_q1))
+        self.assertFalse(np.allclose(h_q0, h_q1))
+        self.assertFalse(np.allclose(g_q0, g_q1))
+
 
 if __name__ == "__main__":
     unittest.main()

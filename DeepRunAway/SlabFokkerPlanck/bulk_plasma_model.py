@@ -30,6 +30,8 @@ class BulkSpecies:
     total_density_m3: float
     ionization_energies_eV: tuple[float, ...]
     initial_charge: int = 0
+    excitation_energies_eV: tuple[float, ...] | None = None
+    screening_lengths: tuple[float, ...] | None = None
 
     def __post_init__(self) -> None:
         if self.atomic_number < 1:
@@ -42,6 +44,17 @@ class BulkSpecies:
             raise ValueError("ionization energies must be finite and positive")
         if not 0 <= self.initial_charge <= self.atomic_number:
             raise ValueError("initial_charge must lie in [0, atomic_number]")
+        if (self.excitation_energies_eV is None) != (self.screening_lengths is None):
+            raise ValueError("excitation energies and screening lengths must be supplied together")
+        if self.excitation_energies_eV is not None:
+            if len(self.excitation_energies_eV) != self.atomic_number + 1:
+                raise ValueError("one excitation energy is required per charge state")
+            if len(self.screening_lengths or ()) != self.atomic_number + 1:
+                raise ValueError("one screening length is required per charge state")
+            if any(e < 0.0 or not math.isfinite(e) for e in self.excitation_energies_eV):
+                raise ValueError("excitation energies must be finite and non-negative")
+            if any(a < 0.0 or not math.isfinite(a) for a in self.screening_lengths or ()):
+                raise ValueError("screening lengths must be finite and non-negative")
 
     @property
     def cumulative_ionization_energies_eV(self) -> np.ndarray:
@@ -153,6 +166,26 @@ class BulkPlasmaModel:
         charge_square = sum(float(np.dot(np.arange(item.atomic_number + 1)**2, pop))
                             for item, pop in zip(self.species, state.populations_m3))
         return ne, charge_square/ne
+
+    def screening_inputs(self, state: BulkState) -> dict[str, tuple[np.ndarray, tuple[float, ...], tuple[float, ...]]]:
+        """Return state-resolved screening inputs for kinetic coefficient assembly.
+
+        Species without explicit atomic screening tables are omitted.  The
+        caller must reject that omission before enabling partial screening;
+        this method never substitutes ionization energies or a mean charge.
+        """
+        self._validate_state(state)
+        result = {}
+        for item, population in zip(self.species, state.populations_m3):
+            if item.excitation_energies_eV is None:
+                continue
+            assert item.screening_lengths is not None
+            result[item.name] = (
+                np.asarray(population, dtype=np.float64).copy(),
+                item.excitation_energies_eV,
+                item.screening_lengths,
+            )
+        return result
 
     def _charge_derivative(self, item: BulkSpecies, bundle: OpenADASBundle,
                            state: BulkState, population: np.ndarray,
@@ -275,9 +308,40 @@ class BulkPlasmaModel:
         """
         if dt_s <= 0.0 or not math.isfinite(dt_s):
             raise ValueError("dt_s must be finite and positive")
+        _, final = self.solve_trbdf2_stages(
+            state, dt_s,
+            kinetic_current_n_A=kinetic_current_A,
+            kinetic_current_gamma_A=kinetic_current_A,
+            kinetic_current_one_A=kinetic_current_A,
+            root_tolerance=root_tolerance,
+        )
+        return final
+
+    def solve_trbdf2_stages(
+        self, state: BulkState, dt_s: float, *,
+        kinetic_current_n_A: float = 0.0,
+        kinetic_current_gamma_A: float | None = None,
+        kinetic_current_one_A: float | None = None,
+        root_tolerance: float = 1.0e-10,
+    ) -> tuple[BulkState, BulkState]:
+        """Solve bulk TR--BDF2 stages for supplied kinetic current moments.
+
+        The three current moments are stage inputs from the kinetic solver. A
+        coupled driver iterates them with the returned bulk stages until its
+        stage residuals meet the configured coupling tolerance.
+        """
+        if dt_s <= 0.0 or not math.isfinite(dt_s):
+            raise ValueError("dt_s must be finite and positive")
         self._validate_state(state)
+        if kinetic_current_gamma_A is None:
+            kinetic_current_gamma_A = kinetic_current_n_A
+        if kinetic_current_one_A is None:
+            kinetic_current_one_A = kinetic_current_gamma_A
+        currents = (kinetic_current_n_A, kinetic_current_gamma_A, kinetic_current_one_A)
+        if any(not math.isfinite(float(current)) for current in currents):
+            raise ValueError("kinetic current moments must be finite")
         y_n = self.pack(state)
-        f_n = self._rhs_vector(y_n, kinetic_current_A)
+        f_n = self._rhs_vector(y_n, float(kinetic_current_n_A))
         d = 1.0 - 1.0/math.sqrt(2.0)
         w = math.sqrt(2.0)/4.0
 
@@ -293,15 +357,19 @@ class BulkPlasmaModel:
             return result.x
 
         y_gamma = safe_root(
-            lambda y: y-y_n-d*dt_s*(f_n+self._rhs_vector(y, kinetic_current_A)),
+            lambda y: y-y_n-d*dt_s*(
+                f_n+self._rhs_vector(y, float(kinetic_current_gamma_A))
+            ),
             y_n+ d*dt_s*f_n, "stage-1",
         )
-        f_gamma = self._rhs_vector(y_gamma, kinetic_current_A)
+        f_gamma = self._rhs_vector(y_gamma, float(kinetic_current_gamma_A))
         y_one = safe_root(
-            lambda y: y-y_n-d*dt_s*self._rhs_vector(y, kinetic_current_A)
+            lambda y: y-y_n-d*dt_s*self._rhs_vector(y, float(kinetic_current_one_A))
             -dt_s*(w*f_n+w*f_gamma),
             y_gamma, "stage-2",
         )
+        stage = self.unpack(y_gamma)
         final = self.unpack(y_one)
+        self._validate_state(stage)
         self._validate_state(final)
-        return final
+        return stage, final

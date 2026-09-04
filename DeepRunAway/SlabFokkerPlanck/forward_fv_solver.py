@@ -92,6 +92,12 @@ class IonSpecies:
     density_m3: float
     I_eV: float = 0.0
     a_bar: float = 0.0
+    # Optional state-resolved inputs supplied by a coupled bulk model.  When
+    # present, entries are ordered q=0,...,Z and replace the legacy scalar
+    # effective-ion screening inputs above.
+    charge_populations_m3: tuple[float, ...] | None = None
+    I_eV_by_charge: tuple[float, ...] | None = None
+    a_bar_by_charge: tuple[float, ...] | None = None
 
     @property
     def n_bound(self) -> int:
@@ -428,12 +434,29 @@ def screening_h_g(p: np.ndarray, cfg: SolverConfig, phys: DerivedPhysics) -> tup
     h = np.zeros_like(p)
     g = np.zeros_like(p)
     for ion in cfg.resolved_ions():
-        if ion.density_m3 == 0.0 or ion.n_bound == 0:
+        if ion.density_m3 == 0.0:
+            continue
+        if ion.charge_populations_m3 is not None:
+            assert ion.I_eV_by_charge is not None
+            assert ion.a_bar_by_charge is not None
+            for charge, population in enumerate(ion.charge_populations_m3):
+                bound = ion.Z - charge
+                if population == 0.0 or bound == 0:
+                    continue
+                rr = population / cfg.ne_m3
+                Ibar = ion.I_eV_by_charge[charge] / MEC2_EV
+                qarg = p*np.sqrt(np.maximum(gamma - 1.0, 0.0))/Ibar
+                h += rr*bound*(0.2*np.log1p(qarg**5) - beta2)
+                y = (p*ion.a_bar_by_charge[charge])**1.5
+                g += rr*((2.0/3.0)*(ion.Z**2 - charge**2)*np.log1p(y)
+                         - (2.0/3.0)*bound**2*y/(1.0 + y))
+            continue
+        if ion.n_bound == 0:
             continue
         rr = ion.density_m3 / cfg.ne_m3
         Ibar = ion.I_eV / MEC2_EV
-        q = p*np.sqrt(np.maximum(gamma - 1.0, 0.0))/Ibar
-        h += rr*ion.n_bound*(0.2*np.log1p(q**5) - beta2)
+        qarg = p*np.sqrt(np.maximum(gamma - 1.0, 0.0))/Ibar
+        h += rr*ion.n_bound*(0.2*np.log1p(qarg**5) - beta2)
         y = (p*ion.a_bar)**1.5
         g += rr*((2.0/3.0)*(ion.Z**2 - ion.Z0**2)*np.log1p(y)
                  - (2.0/3.0)*ion.n_bound**2*y/(1.0 + y))
@@ -2471,6 +2494,18 @@ def load_config(config_path: Path | None = None) -> tuple[SolverConfig, str, Pat
             density_m3=float(ion["density_m3"]),
             I_eV=float(ion.get("I_eV", 0.0)),
             a_bar=float(ion.get("a_bar", 0.0)),
+            charge_populations_m3=(
+                tuple(float(value) for value in ion["charge_populations_m3"])
+                if "charge_populations_m3" in ion else None
+            ),
+            I_eV_by_charge=(
+                tuple(float(value) for value in ion["I_eV_by_charge"])
+                if "I_eV_by_charge" in ion else None
+            ),
+            a_bar_by_charge=(
+                tuple(float(value) for value in ion["a_bar_by_charge"])
+                if "a_bar_by_charge" in ion else None
+            ),
         )
         for ion in plasma["ions"]
     )
@@ -2544,6 +2579,38 @@ def validate_config(cfg: SolverConfig) -> None:
             raise ValueError(f"invalid ion charge/density for {ion.name!r}")
         if ion.Z0 < ion.Z and (ion.I_eV <= 0.0 or ion.a_bar <= 0.0):
             raise ValueError(f"partially ionized ion {ion.name!r} needs I_eV and a_bar > 0")
+        state_inputs = (
+            ion.charge_populations_m3,
+            ion.I_eV_by_charge,
+            ion.a_bar_by_charge,
+        )
+        if any(value is not None for value in state_inputs):
+            if any(value is None for value in state_inputs):
+                raise ValueError(
+                    f"state-resolved screening for {ion.name!r} needs populations, I_eV_by_charge, and a_bar_by_charge"
+                )
+            assert ion.charge_populations_m3 is not None
+            assert ion.I_eV_by_charge is not None
+            assert ion.a_bar_by_charge is not None
+            expected = ion.Z + 1
+            if any(len(value) != expected for value in state_inputs):
+                raise ValueError(
+                    f"state-resolved screening for {ion.name!r} needs Z+1 entries"
+                )
+            if any(value < 0.0 or not math.isfinite(value)
+                   for value in ion.charge_populations_m3):
+                raise ValueError(f"invalid charge populations for {ion.name!r}")
+            if not math.isclose(
+                sum(ion.charge_populations_m3), ion.density_m3,
+                rel_tol=2.0e-12, abs_tol=1.0e6,
+            ):
+                raise ValueError(f"charge populations do not conserve density for {ion.name!r}")
+            for charge, population in enumerate(ion.charge_populations_m3):
+                if population > 0.0 and ion.Z > charge:
+                    if ion.I_eV_by_charge[charge] <= 0.0 or ion.a_bar_by_charge[charge] <= 0.0:
+                        raise ValueError(
+                            f"bound state q={charge} for {ion.name!r} needs positive I_eV and a_bar"
+                        )
     if cfg.small_angle_model not in {
         "finite-temperature-relativistic",
         "fully-relativistic-asymptotically-matched",

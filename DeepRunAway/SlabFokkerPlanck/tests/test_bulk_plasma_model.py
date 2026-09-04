@@ -78,6 +78,29 @@ class BulkPlasmaModelTests(unittest.TestCase):
             self.assertTrue(np.all(final.populations_m3[0] >= 0.0))
             self.assertAlmostEqual(float(final.populations_m3[0].sum()), 1.0e20, delta=2.0e8)
 
+    def test_stage_solver_accepts_stage_kinetic_currents(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = synthetic_bundle(Path(directory))
+            species = BulkSpecies(
+                "D", "H", 1, 1.0e20, (13.6,), initial_charge=1,
+                excitation_energies_eV=(20.0, 25.0),
+                screening_lengths=(0.1, 0.0),
+            )
+            model = BulkPlasmaModel(
+                (species,), {"D": bundle}, area_m2=1.0, major_radius_m=1.0,
+                inductance_H=1.0,
+            )
+            stage, final = model.solve_trbdf2_stages(
+                model.initial_state(10.0, current_A=1.0), 1.0e-10,
+                kinetic_current_n_A=0.0,
+                kinetic_current_gamma_A=0.1,
+                kinetic_current_one_A=0.2,
+            )
+            self.assertGreater(stage.temperature_eV, 0.0)
+            self.assertGreater(final.temperature_eV, 0.0)
+            self.assertAlmostEqual(float(stage.populations_m3[0].sum()), 1.0e20, delta=2.0e8)
+            self.assertAlmostEqual(float(final.populations_m3[0].sum()), 1.0e20, delta=2.0e8)
+
 
 if __name__ == "__main__":
     unittest.main()
