@@ -19,12 +19,11 @@ prescribed bulk-plasma coefficients to a bulk plasma model.
 - `docs/HIPERGATOR.md`: required Hipergator Slurm/GPU workflow.
 - `docs/CODEX_WORKFLOW.md`: compact Codex development and verification guide.
 
-The current executable advances a prescribed plasma state. It is not yet a
-self-consistent kinetic/bulk coupling driver. The host-side bulk subsystem
-provides implicit CR/energy/induction stage solves through
-`BulkPlasmaModel.solve_trbdf2_stages()` and carries explicit state-resolved
-screening inputs. The public GPU time-step exchange, dynamic coefficient update,
-and coupled restart/output API remain future work.
+Standalone mode advances a prescribed plasma state. Optional `[bulk]`
+configuration enables a self-consistent GPU kinetic/bulk driver: host-side CR,
+energy, and induction stages exchange currents and plasma state with distinct
+variable-coefficient kinetic TR--BDF2 operators. Coupled input requires local
+OpenADAS ADF11 bundles plus authoritative state-resolved screening data.
 
 ## Numerical/GPU contract
 
@@ -58,6 +57,5 @@ from Git. Keep large results in scratch or the project data area.
 
 The executable uses the documented Chang--Cooper face flux and TR--BDF2
 stages. Adaptive TR--BDF2 is available through the embedded stiff error
-estimate. Bulk stage equations and state-resolved screening are implemented;
-GPU bulk-state exchange and OpenADAS activation in the executable remain
-separate integration work.
+estimate. Coupled runs preserve one fixed CSR topology, refactorize numerical
+values with cuDSS, and write bulk/restart/OpenADAS provenance.

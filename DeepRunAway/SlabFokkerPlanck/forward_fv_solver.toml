@@ -84,3 +84,35 @@ path = "runaway_0d2p_output.npz"
 # Full 2-D snapshots and scalar diagnostics are independent. Zero means endpoints only/no interiors.
 save_every = 0
 diag_every = 10
+
+# Optional host OpenADAS + GPU kinetic stage coupling. Disabled keeps this
+# executable identical to prescribed-plasma standalone mode. When enabled,
+# every species needs local ADF11 data and authoritative state-resolved
+# excitation/screening arrays; no atomic-data defaults are substituted.
+[bulk]
+enabled = false
+d_to_h = true
+# area_m2 = 1.0
+# major_radius_m = 1.0
+# inductance_H = 1.0
+# applied_voltage_V = 0.0
+# initial_current_A = 0.0
+# stage_tolerance = 1.0e-8
+# max_stage_iterations = 12
+# te_error_scale_eV = 1.0
+# population_error_scale_m3 = 1.0e20
+# current_error_scale_A = 1.0
+# restart_in = "coupled_restart.npz"
+# restart_out = "coupled_restart.npz"
+# restart_every = 0
+# [bulk.bundles]
+# D = "data/openadas/H89"     # D uses H ADF11 data
+# [[bulk.species]]
+# name = "D"
+# adas_element = "H"
+# atomic_number = 1
+# total_density_m3 = 1.0e20
+# ionization_energies_eV = [13.6]
+# initial_charge = 1
+# excitation_energies_eV = [13.6, 0.0]
+# screening_lengths = [0.1, 0.0]

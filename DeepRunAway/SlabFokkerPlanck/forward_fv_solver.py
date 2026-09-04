@@ -57,18 +57,22 @@ from __future__ import annotations
 import tomllib
 import argparse
 import ctypes
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import importlib.metadata as importlib_metadata
 import json
 import math
 from pathlib import Path
 import site
+import subprocess
 import time
 
 import numpy as np
 from numpy.polynomial.legendre import leggauss
 import scipy.constants as const
 import scipy.special as sps
+
+from bulk_plasma_model import BulkPlasmaModel, BulkSpecies, BulkState
+from openadas_data import OpenADASBundle, OpenADASError
 
 try:
     import warp as wp
@@ -104,6 +108,45 @@ class IonSpecies:
         return self.Z - self.Z0
 
 
+
+
+@dataclass(frozen=True)
+class BulkCouplingConfig:
+    """Explicit host-side bulk-model inputs for the coupled GPU driver."""
+
+    enabled: bool = False
+    bundle_paths: tuple[tuple[str, Path], ...] = field(default_factory=tuple)
+    species: tuple[BulkSpecies, ...] = field(default_factory=tuple)
+    d_to_h: bool = True
+    area_m2: float = 1.0
+    major_radius_m: float = 1.0
+    inductance_H: float = 1.0
+    applied_voltage_V: float = 0.0
+    initial_current_A: float = 0.0
+    stage_tolerance: float = 1.0e-8
+    max_stage_iterations: int = 12
+    te_error_scale_eV: float = 1.0
+    population_error_scale_m3: float = 1.0e20
+    current_error_scale_A: float = 1.0
+    restart_in: Path | None = None
+    restart_out: Path | None = None
+    restart_every: int = 0
+
+    def __post_init__(self) -> None:
+        if not self.enabled:
+            return
+        if not self.species:
+            raise ValueError("bulk coupling requires at least one species")
+        if len(self.bundle_paths) != len(self.species):
+            raise ValueError("bulk OpenADAS bundle path required for every species")
+        if any(x <= 0.0 or not math.isfinite(x) for x in (
+            self.area_m2, self.major_radius_m, self.inductance_H,
+            self.stage_tolerance, self.te_error_scale_eV,
+            self.population_error_scale_m3, self.current_error_scale_A,
+        )):
+            raise ValueError("bulk geometry, tolerance, and error scales must be positive")
+        if self.max_stage_iterations < 1 or self.restart_every < 0:
+            raise ValueError("bulk iteration/restart settings are invalid")
 
 
 @dataclass(frozen=True)
@@ -172,6 +215,7 @@ class SolverConfig:
     output: Path = Path("runaway_0d2p_output.npz")
     write_output: bool = True
     balance_check: bool = True
+    bulk: BulkCouplingConfig = field(default_factory=BulkCouplingConfig)
 
     @property
     def include_ch(self) -> bool:
@@ -297,8 +341,18 @@ def derive_physics(cfg: SolverConfig) -> DerivedPhysics:
     ln0 = thermal_coulomb_log(cfg.ne_m3, cfg.te_eV)
     if ln0 <= 0.0:
         raise ValueError(f"thermal Coulomb logarithm is non-positive: {ln0}")
-    free_from_ions = sum(x.density_m3 * x.Z0 for x in ions)
-    z_eff = sum(x.density_m3 * x.Z0**2 for x in ions) / cfg.ne_m3
+    free_from_ions = 0.0
+    charge_square = 0.0
+    for ion in ions:
+        if ion.charge_populations_m3 is not None:
+            populations = np.asarray(ion.charge_populations_m3, dtype=np.float64)
+            charges = np.arange(ion.Z + 1, dtype=np.float64)
+            free_from_ions += float(np.dot(charges, populations))
+            charge_square += float(np.dot(charges*charges, populations))
+        else:
+            free_from_ions += ion.density_m3 * ion.Z0
+            charge_square += ion.density_m3 * ion.Z0**2
+    z_eff = charge_square / cfg.ne_m3
     nref = cfg.ne_m3 if cfg.n_ref_m3 is None else cfg.n_ref_m3
     if nref <= 0.0:
         raise ValueError("n_ref_m3 must be positive")
@@ -316,7 +370,8 @@ def derive_physics(cfg: SolverConfig) -> DerivedPhysics:
             const.e**4 * cfg.B_T**2
         )
         alpha = tauref / taus
-    bound = sum(x.density_m3 * x.n_bound for x in ions)
+    total_nuclei = sum(x.density_m3*x.Z for x in ions)
+    bound = total_nuclei - free_from_ions
     nt = cfg.ne_m3 + bound if cfg.nt_m3 is None else cfg.nt_m3
     if nt < 0.0:
         raise ValueError("nt_m3 must be non-negative")
@@ -2459,6 +2514,347 @@ def run_gpu(
     )
 
 
+def run_coupled_gpu(
+    base_cfg: SolverConfig, model: BulkPlasmaModel, bulk_n: BulkState,
+    phys: DerivedPhysics, grid: Grid, coll: CollisionData,
+    topo: CSRTopology, N0: np.ndarray, gpu_context,
+    ch: CHGeometry | None = None, *, start_tau: float = 0.0,
+) -> dict:
+    """GPU kinetic driver with host bulk stage fixed-point iteration.
+
+    Bulk nonlinear work stays host-side. Kinetic state, CSR graph, numerical
+    values, and cuDSS vectors stay on one CUDA device. Each stage gets its own
+    variable-coefficient matrix; only CSR values change after one analysis.
+    """
+    if wp is None:
+        raise RuntimeError("coupled production path requires Warp and CUDA")
+    nvmath, cudss, dev_obj, runtime = gpu_context
+    dev = base_cfg.device
+    physical_n = grid.size
+    d = 1.0 - 1.0/math.sqrt(2.0)
+    reference_tau_s = phys.tau_ref_s
+
+    def wa(x, dtype=wp.float64):
+        return wp.array(np.ascontiguousarray(x), dtype=dtype, device=dev)
+
+    row_ptr, col_ind = topo.row_ptr, topo.col_ind
+    values = wp.zeros(topo.nnz, dtype=wp.float64, device=dev)
+    p_faces, p_centers = wa(grid.p_faces), wa(grid.p_centers)
+    xi_faces, xi_centers = wa(grid.xi_faces), wa(grid.xi_centers)
+    radial_volume, cell_volume = wa(grid.radial_volume), wa(grid.cell_volume)
+    rhs = wp.zeros(topo.n, dtype=wp.float64, device=dev)
+    solution = wp.zeros(topo.n, dtype=wp.float64, device=dev)
+    state_n = wp.zeros(topo.n, dtype=wp.float64, device=dev)
+    state_gamma = wp.zeros(topo.n, dtype=wp.float64, device=dev)
+    state_one = wp.zeros(topo.n, dtype=wp.float64, device=dev)
+    applied_n = wp.zeros(topo.n, dtype=wp.float64, device=dev)
+    applied_gamma = wp.zeros(topo.n, dtype=wp.float64, device=dev)
+    applied_one = wp.zeros(topo.n, dtype=wp.float64, device=dev)
+    residual = wp.zeros(topo.n, dtype=wp.float64, device=dev)
+    state_flag = wp.zeros(1, dtype=wp.int32, device=dev)
+    initial = wa(N0)
+    wp.launch(copy_prefix_kernel, dim=physical_n, inputs=[initial], outputs=[state_n], device=dev)
+    if ch is not None and ch.active_count:
+        wp.launch(fill_aux_state_kernel, dim=grid.Np,
+                  inputs=[initial, physical_n, grid.Nxi], outputs=[state_n], device=dev)
+
+    def stage_ch(stage_cfg, stage_phys):
+        if not stage_cfg.include_ch:
+            return None
+        result = build_ch_geometry(stage_cfg, stage_phys, grid)
+        if ch is not None and result.active_rows.shape != ch.active_rows.shape:
+            raise RuntimeError("coupled stage changed Chiu-Harvey CSR topology")
+        return result
+
+    def assemble(stage_cfg, stage_phys, stage_coll, stage_ch, dt_s):
+        dtau = dt_s/stage_phys.tau_ref_s
+        cf = wa(stage_coll.cf_faces)
+        ca = wa(stage_coll.ca_faces)
+        nud = wa(stage_coll.nud_centers)
+        wp.launch(
+            assemble_trbdf2_matrix_kernel, dim=physical_n,
+            inputs=[p_faces, p_centers, xi_faces, xi_centers,
+                    radial_volume, cell_volume, cf, ca, nud,
+                    topo.diag_slot, topo.pm_slot, topo.pp_slot, topo.xm_slot, topo.xp_slot,
+                    grid.Np, grid.Nxi, wp.float64(grid.dp), wp.float64(grid.dxi),
+                    wp.float64(stage_phys.Ebar), wp.float64(stage_phys.alpha),
+                    wp.float64(d*dtau), wp.float64(1.0),
+                    1 if stage_cfg.inner_boundary == "absorbing" else 0],
+            outputs=[values], device=dev,
+        )
+        if stage_ch is not None and stage_ch.active_count:
+            if topo.formulation != "augmented-ch":
+                raise RuntimeError("coupled Chiu-Harvey source requires augmented topology")
+            coeff = wa(stage_ch.row_coefficient)
+            wp.launch(add_ch_augmented_kernel, dim=stage_ch.active_count,
+                      inputs=[coeff, topo.ch_aux_slot, wp.float64(d*dtau)], outputs=[values], device=dev)
+            wp.launch(fill_aux_constraint_n_kernel, dim=physical_n,
+                      inputs=[topo.aux_n_start_slot, grid.Nxi], outputs=[values], device=dev)
+            wp.launch(fill_aux_constraint_diag_kernel, dim=grid.Np,
+                      inputs=[topo.aux_diag_slot], outputs=[values], device=dev)
+        wp.synchronize_stream(wp.get_stream(dev_obj))
+
+    def current_A(arr, stage_cfg, stage_phys):
+        host = np.asarray(arr.numpy(), dtype=np.float64)[:physical_n]
+        return diagnostics(host, stage_cfg, stage_phys, grid)["current_A_m2"]*model.area_m2
+
+    def state_norm(arr):
+        full = np.asarray(arr.numpy(), dtype=np.float64)
+        if not np.all(np.isfinite(full)) or np.any(full < 0.0):
+            raise FloatingPointError("coupled kinetic state is non-finite or negative")
+        return full[:physical_n]
+
+    times = [float(start_tau)]
+    dlist = [diagnostics(N0, kinetic_config_from_bulk(base_cfg, model, bulk_n, 0.0), phys, grid)]
+    bulk_history = [{
+        "tau": float(start_tau), "state": bulk_n,
+        "diagnostics": model.diagnostics(bulk_n, 0.0),
+    }]
+    coupling_history: list[dict[str, float | int]] = []
+    snapshots: list[np.ndarray] = []
+    snapshot_steps: list[int] = []
+    snapshot_times: list[float] = []
+
+    def record(step, tau_now, arr, stage_cfg, stage_phys, bulk_state, kinetic_current_A):
+        interior = tau_now < base_cfg.tau_end - 1.0e-14*max(1.0, base_cfg.tau_end)
+        need_diag = interior and base_cfg.diag_every > 0 and step % base_cfg.diag_every == 0
+        need_snap = interior and base_cfg.save_every > 0 and step % base_cfg.save_every == 0
+        if need_diag or need_snap:
+            host = state_norm(arr)
+            if need_diag:
+                times.append(float(tau_now))
+                dlist.append(diagnostics(host, stage_cfg, stage_phys, grid))
+            if need_snap:
+                snapshot_steps.append(step)
+                snapshot_times.append(float(tau_now))
+                snapshots.append(host.reshape(grid.Np, grid.Nxi))
+        bulk_history.append({
+            "tau": float(tau_now), "state": bulk_state,
+            "diagnostics": model.diagnostics(bulk_state, kinetic_current_A),
+        })
+
+    threading = find_cudss_threading_layer()
+    with CudssDirectSystem(
+        nvmath=nvmath, cudss=cudss, row_ptr=row_ptr, col_ind=col_ind,
+        values=values, rhs=rhs, solution=solution, n=topo.n, nnz=topo.nnz,
+        threading_layer=threading,
+    ) as direct:
+        analysis_s = direct.analyze()
+        factorized = False
+        accepted_steps = rejected_steps = 0
+        current_tau = float(start_tau)
+        trial_dt = min(base_cfg.dtau, base_cfg.tau_end-current_tau)
+        if base_cfg.adaptive and base_cfg.dtau_max is not None:
+            trial_dt = min(trial_dt, base_cfg.dtau_max)
+        stage_times: list[float] = []
+        refactorization_total = 0.0
+        assembly_total = 0.0
+        first_stage_residual = last_residual = 0.0
+        final_bulk = bulk_n
+        balance = None
+        factorization_s = 0.0
+        current_one_guess = 0.0
+        final_cfg = kinetic_config_from_bulk(base_cfg, model, bulk_n, 0.0)
+        final_phys = derive_physics(final_cfg)
+        final_coll = coll
+        final_ch = ch
+
+        while current_tau < base_cfg.tau_end - 1.0e-14*max(1.0, base_cfg.tau_end):
+            trial_dt = min(trial_dt, base_cfg.tau_end-current_tau)
+            if trial_dt <= 0.0 or (base_cfg.adaptive and trial_dt < base_cfg.dtau_min):
+                raise RuntimeError("coupled timestep fell below runtime.dtau_min")
+            n_host = state_norm(state_n)
+            cfg_n = kinetic_config_from_bulk(base_cfg, model, bulk_n, 0.0)
+            phys_n = derive_physics(cfg_n)
+            current_n = current_A(state_n, cfg_n, phys_n)
+            cfg_n = kinetic_config_from_bulk(base_cfg, model, bulk_n, current_n)
+            phys_n = derive_physics(cfg_n)
+            dt_s = trial_dt*reference_tau_s
+            bulk_gamma_guess = bulk_n
+            bulk_one_guess = bulk_n
+            current_gamma_guess = current_n
+            current_one_guess = current_n
+            converged = False
+            error_norm = 0.0
+
+            for iteration in range(1, base_cfg.bulk.max_stage_iterations+1):
+                new_gamma, new_one = model.solve_trbdf2_stages(
+                    bulk_n, dt_s,
+                    kinetic_current_n_A=current_n,
+                    kinetic_current_gamma_A=current_gamma_guess,
+                    kinetic_current_one_A=current_one_guess,
+                )
+                cfg_gamma = kinetic_config_from_bulk(base_cfg, model, new_gamma, current_gamma_guess)
+                cfg_one = kinetic_config_from_bulk(base_cfg, model, new_one, current_one_guess)
+                phys_gamma, phys_one = derive_physics(cfg_gamma), derive_physics(cfg_one)
+                t_assembly = time.perf_counter()
+                coll_n = build_collision_data(cfg_n, phys_n, grid)
+                ch_n = stage_ch(cfg_n, phys_n)
+                assemble(cfg_n, phys_n, coll_n, ch_n, dt_s)
+                if balance is None and base_cfg.balance_check:
+                    balance = gpu_fv_balance_check(
+                        cfg_n, phys_n, grid, coll_n, topo, row_ptr, col_ind, values, dev,
+                        matrix_dt=d*dt_s/phys_n.tau_ref_s, ch=ch_n,
+                    )
+                    if balance["rel_defect"] > 1.0e-9 or balance["aux_constraint_abs_defect"] > 1.0e-12:
+                        raise RuntimeError("coupled finite-volume balance self-check failed")
+                wp.launch(csr_matvec_kernel, dim=topo.n,
+                          inputs=[row_ptr, col_ind, values, state_n], outputs=[applied_n], device=dev)
+                coll_gamma = build_collision_data(cfg_gamma, phys_gamma, grid)
+                assemble(cfg_gamma, phys_gamma, coll_gamma, stage_ch(cfg_gamma, phys_gamma), dt_s)
+                assembly_total += time.perf_counter()-t_assembly
+                factor_time = direct.factorize() if not factorized else direct.refactorize()
+                if not factorized:
+                    factorization_s += factor_time
+                else:
+                    refactorization_total += factor_time
+                factorized = True
+                wp.launch(build_trbdf2_stage1_rhs_kernel, dim=topo.n,
+                          inputs=[state_n, applied_n, physical_n], outputs=[rhs], device=dev)
+                stage_times.append(direct.solve())
+                gamma_residual = gpu_relative_residual(
+                    row_ptr, col_ind, values, solution, rhs, residual, topo.n, dev
+                )
+                if not math.isfinite(gamma_residual) or gamma_residual > 1.0e-8:
+                    raise RuntimeError(f"coupled kinetic stage residual too large: {gamma_residual:.3e}")
+                if iteration == 1 and accepted_steps == 0 and not coupling_history:
+                    first_stage_residual = gamma_residual
+                wp.launch(copy_all_kernel, dim=topo.n, inputs=[solution], outputs=[state_gamma], device=dev)
+                state_norm(state_gamma)
+                new_current_gamma = current_A(state_gamma, cfg_gamma, phys_gamma)
+
+                t_assembly = time.perf_counter()
+                wp.launch(csr_matvec_kernel, dim=topo.n,
+                          inputs=[row_ptr, col_ind, values, state_gamma], outputs=[applied_gamma], device=dev)
+                coll_one = build_collision_data(cfg_one, phys_one, grid)
+                ch_one = stage_ch(cfg_one, phys_one)
+                assemble(cfg_one, phys_one, coll_one, ch_one, dt_s)
+                assembly_total += time.perf_counter()-t_assembly
+                refactorization_total += direct.refactorize()
+                wp.launch(build_trbdf2_stage2_rhs_kernel, dim=topo.n,
+                          inputs=[state_n, applied_n, state_gamma, applied_gamma,
+                                  physical_n, wp.float64(1.0/d)], outputs=[rhs], device=dev)
+                stage_times.append(direct.solve())
+                last_residual = gpu_relative_residual(
+                    row_ptr, col_ind, values, solution, rhs, residual, topo.n, dev
+                )
+                if not math.isfinite(last_residual) or last_residual > 1.0e-8:
+                    raise RuntimeError(f"coupled kinetic stage residual too large: {last_residual:.3e}")
+                wp.launch(copy_all_kernel, dim=topo.n, inputs=[solution], outputs=[state_one], device=dev)
+                state_norm(state_one)
+                new_current_one = current_A(state_one, cfg_one, phys_one)
+                r_gamma = coupling_residual(
+                    bulk_gamma_guess, new_gamma,
+                    (current_gamma_guess, current_one_guess),
+                    (new_current_gamma, new_current_one), base_cfg.bulk,
+                )
+                r_one = coupling_residual(
+                    bulk_one_guess, new_one,
+                    (current_gamma_guess, current_one_guess),
+                    (new_current_gamma, new_current_one), base_cfg.bulk,
+                )
+                coupling_r = max(r_gamma, r_one)
+                coupling_history.append({"tau": current_tau, "iteration": iteration, "residual": coupling_r})
+                bulk_gamma_guess, bulk_one_guess = new_gamma, new_one
+                current_gamma_guess, current_one_guess = new_current_gamma, new_current_one
+                final_bulk = new_one
+                final_cfg, final_phys, final_coll, final_ch = cfg_one, phys_one, coll_one, ch_one
+                if coupling_r <= base_cfg.bulk.stage_tolerance:
+                    converged = True
+                    break
+
+            if not converged:
+                rejected_steps += 1
+                if not base_cfg.adaptive:
+                    raise RuntimeError(
+                        f"bulk/kinetic stage coupling failed to converge in "
+                        f"{base_cfg.bulk.max_stage_iterations} iterations; timestep discarded"
+                    )
+                trial_dt *= base_cfg.min_factor
+                if trial_dt < base_cfg.dtau_min:
+                    raise RuntimeError("coupled stage rejection reached runtime.dtau_min")
+                continue
+
+            wp.launch(monitor_state_kernel, dim=physical_n, inputs=[state_one, state_flag], device=dev)
+            if base_cfg.adaptive:
+                wp.launch(csr_matvec_kernel, dim=topo.n,
+                          inputs=[row_ptr, col_ind, values, state_one], outputs=[applied_one], device=dev)
+                wp.launch(build_trbdf2_error_rhs_kernel, dim=topo.n,
+                          inputs=[state_n, applied_n, state_gamma, applied_gamma,
+                                  state_one, applied_one, physical_n, wp.float64(1.0/d)], outputs=[rhs], device=dev)
+                direct.solve()
+                err = np.asarray(solution.numpy(), dtype=np.float64)[:physical_n]
+                endpoint = np.asarray(state_one.numpy(), dtype=np.float64)[:physical_n]
+                previous = n_host
+                scale = base_cfg.atol + base_cfg.rtol*np.maximum(np.abs(endpoint), np.abs(previous))
+                error_norm = float(np.sqrt(np.mean((err/scale)**2)))
+                if not math.isfinite(error_norm):
+                    raise FloatingPointError("non-finite coupled adaptive error estimate")
+
+            if not base_cfg.adaptive or error_norm <= 1.0:
+                accepted_steps += 1
+                current_tau += trial_dt
+                wp.launch(copy_all_kernel, dim=topo.n, inputs=[state_one], outputs=[state_n], device=dev)
+                bulk_n = final_bulk
+                record(
+                    accepted_steps, current_tau, state_n, cfg_one, phys_one,
+                    bulk_n, current_one_guess,
+                )
+                if base_cfg.bulk.restart_out is not None and base_cfg.bulk.restart_every > 0 \
+                        and accepted_steps % base_cfg.bulk.restart_every == 0:
+                    checkpoint = {"N_final": np.asarray(state_n.numpy(), dtype=np.float64)[:physical_n],
+                                  "coupled_tau": np.asarray(current_tau, dtype=np.float64)}
+                    checkpoint.update(bulk_state_payload(bulk_n))
+                    base_cfg.bulk.restart_out.parent.mkdir(parents=True, exist_ok=True)
+                    np.savez_compressed(base_cfg.bulk.restart_out, **checkpoint)
+                if base_cfg.adaptive:
+                    factor = base_cfg.max_factor if error_norm == 0.0 else base_cfg.safety*error_norm**(-1.0/3.0)
+                    trial_dt *= min(base_cfg.max_factor, max(base_cfg.min_factor, factor))
+                    if base_cfg.dtau_max is not None:
+                        trial_dt = min(trial_dt, base_cfg.dtau_max)
+                elif accepted_steps >= nsteps_from_cfg(base_cfg):
+                    break
+            else:
+                rejected_steps += 1
+                factor = min(1.0, max(base_cfg.min_factor, base_cfg.safety*error_norm**(-1.0/3.0)))
+                trial_dt *= factor
+                if trial_dt < base_cfg.dtau_min:
+                    raise RuntimeError("coupled adaptive rejection reached runtime.dtau_min")
+            if accepted_steps + rejected_steps > base_cfg.max_steps:
+                raise RuntimeError("coupled timestep exceeded runtime.max_steps")
+
+        final = np.asarray(state_n.numpy(), dtype=np.float64)[:physical_n]
+    if current_tau > 0.0:
+        times.append(float(current_tau))
+        final_cfg = kinetic_config_from_bulk(base_cfg, model, bulk_n, current_one_guess)
+        dlist.append(diagnostics(final, final_cfg, derive_physics(final_cfg), grid))
+    return {
+        "backend": "gpu-warp-cudss-coupled",
+        "runtime": runtime, "large_angle_formulation": topo.formulation,
+        "final": final, "initial": N0, "history_t": times, "history_d": dlist,
+        "snapshot_steps": snapshot_steps, "snapshot_t": snapshot_times, "snapshots": snapshots,
+        "bulk_final": bulk_n, "bulk_history": bulk_history,
+        "coupling_history": coupling_history,
+        "openadas_provenance": {
+            name: bundle.provenance() for name, bundle in model.bundles.items()
+        },
+        "d_to_h": base_cfg.bulk.d_to_h,
+        "accepted_steps": accepted_steps, "rejected_steps": rejected_steps,
+        "first_stage_residual": first_stage_residual, "be_residual": first_stage_residual,
+        "last_residual": last_residual,
+        "analysis_s": analysis_s, "assembly_s": assembly_total,
+        "factorization_s": factorization_s, "refactorization_s": refactorization_total,
+        "first_stage_solve_s": stage_times[0] if stage_times else 0.0,
+        "mean_stage_solve_s": float(np.mean(stage_times)) if stage_times else 0.0,
+        "state_monitor_flag": int(np.asarray(state_flag.numpy(), dtype=np.int32)[0]),
+        "state_change": state_change_norms(final, N0),
+        "final_particle_rates": particle_balance_terms(
+            final, final_cfg, final_phys, grid, final_coll, ch=final_ch,
+        ),
+        "balance_check": balance,
+    }
+
+
 
 # =============================================================================
 # TOML configuration, reporting, and output
@@ -2485,6 +2881,7 @@ def load_config(config_path: Path | None = None) -> tuple[SolverConfig, str, Pat
     seed = raw["seed"]
     runtime = raw["runtime"]
     output = raw["output"]
+    bulk_raw = raw.get("bulk", {})
 
     ions = tuple(
         IonSpecies(
@@ -2513,6 +2910,53 @@ def load_config(config_path: Path | None = None) -> tuple[SolverConfig, str, Pat
     output_path = Path(output["path"])
     if not output_path.is_absolute():
         output_path = path.parent / output_path
+
+    bulk_species = tuple(
+        BulkSpecies(
+            name=str(item["name"]),
+            adas_element=str(item.get("adas_element", item["name"])),
+            atomic_number=int(item["atomic_number"]),
+            total_density_m3=float(item["total_density_m3"]),
+            ionization_energies_eV=tuple(float(x) for x in item["ionization_energies_eV"]),
+            initial_charge=int(item.get("initial_charge", 0)),
+            excitation_energies_eV=(
+                tuple(float(x) for x in item["excitation_energies_eV"])
+                if "excitation_energies_eV" in item else None
+            ),
+            screening_lengths=(
+                tuple(float(x) for x in item["screening_lengths"])
+                if "screening_lengths" in item else None
+            ),
+        )
+        for item in bulk_raw.get("species", [])
+    )
+    bundle_table = bulk_raw.get("bundles", {})
+    bundle_paths = tuple(
+        (species.name, (path.parent / Path(bundle_table[species.name])).resolve())
+        for species in bulk_species
+        if species.name in bundle_table
+    )
+    restart_in = bulk_raw.get("restart_in")
+    restart_out = bulk_raw.get("restart_out")
+    bulk_cfg = BulkCouplingConfig(
+        enabled=bool(bulk_raw.get("enabled", False)),
+        bundle_paths=bundle_paths,
+        species=bulk_species,
+        d_to_h=bool(bulk_raw.get("d_to_h", True)),
+        area_m2=float(bulk_raw.get("area_m2", 1.0)),
+        major_radius_m=float(bulk_raw.get("major_radius_m", 1.0)),
+        inductance_H=float(bulk_raw.get("inductance_H", 1.0)),
+        applied_voltage_V=float(bulk_raw.get("applied_voltage_V", 0.0)),
+        initial_current_A=float(bulk_raw.get("initial_current_A", 0.0)),
+        stage_tolerance=float(bulk_raw.get("stage_tolerance", 1.0e-8)),
+        max_stage_iterations=int(bulk_raw.get("max_stage_iterations", 12)),
+        te_error_scale_eV=float(bulk_raw.get("te_error_scale_eV", 1.0)),
+        population_error_scale_m3=float(bulk_raw.get("population_error_scale_m3", 1.0e20)),
+        current_error_scale_A=float(bulk_raw.get("current_error_scale_A", 1.0)),
+        restart_in=(path.parent / Path(restart_in)).resolve() if restart_in else None,
+        restart_out=(path.parent / Path(restart_out)).resolve() if restart_out else None,
+        restart_every=int(bulk_raw.get("restart_every", 0)),
+    )
 
     cfg = SolverConfig(
         te_eV=float(plasma["te_eV"]),
@@ -2563,6 +3007,7 @@ def load_config(config_path: Path | None = None) -> tuple[SolverConfig, str, Pat
         output=output_path,
         write_output=output["write"],
         balance_check=runtime["balance_check"],
+        bulk=bulk_cfg,
     )
     validate_config(cfg)
     return cfg, text, path
@@ -2577,7 +3022,8 @@ def validate_config(cfg: SolverConfig) -> None:
     for ion in cfg.ions:
         if ion.Z < 1 or not 0 <= ion.Z0 <= ion.Z or ion.density_m3 < 0.0:
             raise ValueError(f"invalid ion charge/density for {ion.name!r}")
-        if ion.Z0 < ion.Z and (ion.I_eV <= 0.0 or ion.a_bar <= 0.0):
+        has_state_inputs = ion.charge_populations_m3 is not None
+        if ion.Z0 < ion.Z and not has_state_inputs and (ion.I_eV <= 0.0 or ion.a_bar <= 0.0):
             raise ValueError(f"partially ionized ion {ion.name!r} needs I_eV and a_bar > 0")
         state_inputs = (
             ion.charge_populations_m3,
@@ -2655,6 +3101,119 @@ def validate_config(cfg: SolverConfig) -> None:
         raise ValueError("save_every and diag_every must be nonnegative")
     if not cfg.device:
         raise ValueError("runtime.device must be nonempty")
+
+
+def _openadas_bundle_paths(directory: Path) -> dict[str, Path]:
+    directory = Path(directory)
+    if not directory.is_dir():
+        raise OpenADASError(f"OpenADAS bundle directory does not exist: {directory}")
+    paths = {}
+    for data_class in ("acd", "scd", "plt", "prb"):
+        matches = sorted(directory.glob(f"{data_class}*.dat"))
+        if len(matches) != 1:
+            raise OpenADASError(
+                f"{directory}: expected exactly one {data_class.upper()} ADF11 file"
+            )
+        paths[data_class] = matches[0]
+    return paths
+
+
+def build_bulk_model(cfg: SolverConfig) -> BulkPlasmaModel | None:
+    """Load local OpenADAS inputs and construct enabled bulk coupling."""
+    if not cfg.bulk.enabled:
+        return None
+    path_by_name = dict(cfg.bulk.bundle_paths)
+    bundles: dict[str, OpenADASBundle] = {}
+    for species in cfg.bulk.species:
+        if cfg.bulk.d_to_h and species.name.upper() in {"D", "DEUTERIUM"}:
+            if species.adas_element.upper() != "H":
+                raise ValueError("D-to-H mapping requires deuterium species adas_element='H'")
+        bundle_dir = path_by_name.get(species.name)
+        if bundle_dir is None:
+            raise ValueError(f"missing local OpenADAS bundle path for {species.name!r}")
+        if species.excitation_energies_eV is None or species.screening_lengths is None:
+            raise ValueError(
+                f"bulk coupling requires authoritative state-resolved excitation energies "
+                f"and screening lengths for {species.name!r}; no substitution is allowed"
+            )
+        bundles[species.name] = OpenADASBundle.from_paths(
+            species.adas_element, _openadas_bundle_paths(bundle_dir)
+        )
+    return BulkPlasmaModel(
+        cfg.bulk.species, bundles,
+        area_m2=cfg.bulk.area_m2,
+        major_radius_m=cfg.bulk.major_radius_m,
+        inductance_H=cfg.bulk.inductance_H,
+        applied_voltage_V=cfg.bulk.applied_voltage_V,
+    )
+
+
+def kinetic_config_from_bulk(
+    base_cfg: SolverConfig, model: BulkPlasmaModel, state: BulkState,
+    kinetic_current_A: float,
+) -> SolverConfig:
+    """Map one bulk stage into kinetic coefficients without mean-charge closure."""
+    diagnostics_ = model.diagnostics(state, kinetic_current_A)
+    screening = model.screening_inputs(state)
+    ions = []
+    for species in model.species:
+        if species.name not in screening:
+            raise ValueError(
+                f"missing state-resolved screening inputs for {species.name!r}; "
+                "authoritative I_s,q and a_bar_s,q data required"
+            )
+        populations, excitation, lengths = screening[species.name]
+        ions.append(IonSpecies(
+            name=species.name, Z=species.atomic_number, Z0=0,
+            density_m3=species.total_density_m3,
+            charge_populations_m3=tuple(float(x) for x in populations),
+            I_eV_by_charge=tuple(float(x) for x in excitation),
+            a_bar_by_charge=tuple(float(x) for x in lengths),
+        ))
+    reference_density = base_cfg.n_ref_m3
+    if reference_density is None:
+        reference_density = base_cfg.ne_m3
+    return replace(
+        base_cfg,
+        te_eV=state.temperature_eV,
+        ne_m3=diagnostics_.electron_density_m3,
+        e_parallel_Vm=diagnostics_.electric_field_V_m,
+        ions=tuple(ions),
+        nt_m3=None,
+        n_ref_m3=reference_density,
+    )
+
+
+def coupling_residual(
+    previous: BulkState, current: BulkState, previous_currents_A: tuple[float, float],
+    current_currents_A: tuple[float, float], cfg: BulkCouplingConfig,
+) -> float:
+    """Scaled infinity residual for bulk stage states and kinetic moments."""
+    values = [
+        abs(current.temperature_eV-previous.temperature_eV)/cfg.te_error_scale_eV,
+        abs(current.current_A-previous.current_A)/cfg.current_error_scale_A,
+    ]
+    for old, new in zip(previous.populations_m3, current.populations_m3):
+        values.append(float(np.max(np.abs(np.asarray(new)-np.asarray(old))))/
+                     cfg.population_error_scale_m3)
+    values.extend(
+        abs(float(new)-float(old))/cfg.current_error_scale_A
+        for old, new in zip(previous_currents_A, current_currents_A)
+    )
+    result = max(values)
+    if not math.isfinite(result):
+        raise FloatingPointError("non-finite bulk/kinetic coupling residual")
+    return float(result)
+
+
+def _git_commit() -> str:
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True,
+            check=True, cwd=Path(__file__).resolve().parent,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
 
 
 
@@ -2767,7 +3326,53 @@ def report_result(result: dict, cfg: SolverConfig, phys: DerivedPhysics, grid: G
 def config_json(cfg: SolverConfig) -> str:
     d = asdict(cfg)
     d["output"] = str(cfg.output)
-    return json.dumps(d, sort_keys=True)
+    if cfg.bulk.restart_in is not None:
+        d["bulk"]["restart_in"] = str(cfg.bulk.restart_in)
+    if cfg.bulk.restart_out is not None:
+        d["bulk"]["restart_out"] = str(cfg.bulk.restart_out)
+    return json.dumps(d, sort_keys=True, default=str)
+
+
+def bulk_state_payload(state: BulkState | None) -> dict[str, np.ndarray]:
+    if state is None:
+        return {}
+    payload = {
+        "bulk_temperature_eV": np.asarray(state.temperature_eV, dtype=np.float64),
+        "bulk_current_A": np.asarray(state.current_A, dtype=np.float64),
+    }
+    for index, population in enumerate(state.populations_m3):
+        payload[f"bulk_population_{index}"] = np.asarray(population, dtype=np.float64)
+    return payload
+
+
+def load_coupled_restart(path: Path, model: BulkPlasmaModel, grid: Grid) -> tuple[np.ndarray, BulkState, float]:
+    """Load and validate one coupled checkpoint without altering live state."""
+    path = Path(path).resolve()
+    if not path.is_file():
+        raise ValueError(f"coupled restart file does not exist: {path}")
+    with np.load(path, allow_pickle=False) as data:
+        if "N_final" not in data or data["N_final"].size != grid.size:
+            raise ValueError("coupled restart grid/state size does not match input grid")
+        kinetic = np.ascontiguousarray(data["N_final"], dtype=np.float64).ravel()
+        if not np.all(np.isfinite(kinetic)) or np.any(kinetic < 0.0):
+            raise ValueError("coupled restart kinetic state is non-finite or negative")
+        if "bulk_temperature_eV" not in data or "bulk_current_A" not in data:
+            raise ValueError("coupled restart lacks bulk temperature/current")
+        populations = []
+        for index, species in enumerate(model.species):
+            key = f"bulk_population_{index}"
+            if key not in data or data[key].shape != (species.atomic_number + 1,):
+                raise ValueError(f"coupled restart lacks valid population for {species.name!r}")
+            populations.append(np.ascontiguousarray(data[key], dtype=np.float64))
+        state = BulkState(
+            float(data["bulk_temperature_eV"]), tuple(populations),
+            float(data["bulk_current_A"]),
+        )
+        model._validate_state(state)
+        start_tau = float(data["coupled_tau"] if "coupled_tau" in data else 0.0)
+        if not math.isfinite(start_tau) or start_tau < 0.0:
+            raise ValueError("coupled restart time must be finite and non-negative")
+        return kinetic, state, start_tau
 
 
 def save_result(
@@ -2833,9 +3438,26 @@ def save_result(
         rejected_steps=np.asarray(result.get("rejected_steps", 0), dtype=np.int64),
         adaptive=np.asarray(cfg.adaptive),
         first_stage_residual=np.asarray(result.get("first_stage_residual", 0.0)),
-        be_residual=np.asarray(result["be_residual"]),
+        be_residual=np.asarray(result.get("be_residual", result.get("first_stage_residual", 0.0))),
         last_residual=np.asarray(result["last_residual"]),
+        coupling_enabled=np.asarray(cfg.bulk.enabled),
+        coupled_tau=np.asarray(result.get("history_t", [0.0])[-1], dtype=np.float64),
+        coupling_history_json=np.asarray(json.dumps(result.get("coupling_history", []), default=str)),
+        bulk_history_json=np.asarray(json.dumps([
+            {
+                "tau": item["tau"],
+                "state": asdict(item["state"]),
+                "diagnostics": asdict(item["diagnostics"]),
+            }
+            for item in result.get("bulk_history", [])
+        ], default=lambda x: x.tolist() if isinstance(x, np.ndarray) else str(x), sort_keys=True)),
+        git_commit=np.asarray(_git_commit()),
+        openadas_provenance_json=np.asarray(json.dumps(
+            result.get("openadas_provenance", {}), sort_keys=True, default=str
+        )),
+        d_to_h_mapping=np.asarray(result.get("d_to_h", False)),
     )
+    payload.update(bulk_state_payload(result.get("bulk_final")))
     for k, snap in enumerate(result.get("snapshots", [])):
         payload[f"N_snapshot_{k:06d}"] = np.asarray(snap, dtype=np.float64)
     np.savez_compressed(path, **payload)
@@ -2859,23 +3481,33 @@ def main():
 
     print(f"loaded case: {config_path.expanduser().resolve()}")
     t0 = time.perf_counter()
-    phys = derive_physics(cfg)
+    bulk_model = build_bulk_model(cfg)
+    bulk_state = None
+    start_tau = 0.0
+    kinetic_cfg = cfg
+    if bulk_model is not None:
+        bulk_state = bulk_model.initial_state(cfg.te_eV, cfg.bulk.initial_current_A)
+        kinetic_cfg = kinetic_config_from_bulk(cfg, bulk_model, bulk_state, 0.0)
     grid = build_grid(cfg)
+    if bulk_model is not None and cfg.bulk.restart_in is not None:
+        N0, bulk_state, start_tau = load_coupled_restart(cfg.bulk.restart_in, bulk_model, grid)
+        kinetic_cfg = kinetic_config_from_bulk(cfg, bulk_model, bulk_state, 0.0)
+    phys = derive_physics(kinetic_cfg)
 
     print(f"evaluating {cfg.small_angle_model} small-angle collision coefficients ...", flush=True)
     t = time.perf_counter()
-    coll = build_collision_data(cfg, phys, grid)
+    coll = build_collision_data(kinetic_cfg, phys, grid)
     validate_collision_data(coll)
     print(f"collision coefficients: {time.perf_counter()-t:.3f} s")
     if max(coll.overlap_rel_psi_s, coll.overlap_rel_psi_d) > 1.0e-7:
         print("WARNING: small-argument/direct collision overlap exceeds 1e-7; inspect coefficient convergence")
 
     ch = None
-    if cfg.include_ch:
+    if kinetic_cfg.include_ch:
         print("precomputing Chiu-Harvey geometry ...", flush=True)
         t = time.perf_counter()
-        ch = build_ch_geometry(cfg, phys, grid)
-        validate_ch_geometry(cfg, grid, ch)
+        ch = build_ch_geometry(kinetic_cfg, phys, grid)
+        validate_ch_geometry(kinetic_cfg, grid, ch)
         print(f"Chiu-Harvey geometry: {time.perf_counter()-t:.3f} s")
 
     print("initializing Warp/cuDSS runtime ...", flush=True)
@@ -2898,16 +3530,23 @@ def main():
 
     print("projecting initial distribution ...", flush=True)
     t = time.perf_counter()
-    N0 = project_initial(cfg, phys, grid)
+    if bulk_model is None or cfg.bulk.restart_in is None:
+        N0 = project_initial(kinetic_cfg, phys, grid)
     if not np.all(np.isfinite(N0)) or np.any(N0 < 0.0):
         raise FloatingPointError("initial finite-volume state is invalid")
     print(f"initial projection: {time.perf_counter()-t:.3f} s")
-    print_problem(cfg, phys, grid, coll, topo, N0, ch=ch)
+    print_problem(kinetic_cfg, phys, grid, coll, topo, N0, ch=ch)
 
-    result = run_gpu(cfg, phys, grid, coll, topo, N0, gpu_context, ch=ch)
+    if bulk_model is None:
+        result = run_gpu(cfg, phys, grid, coll, topo, N0, gpu_context, ch=ch)
+    else:
+        result = run_coupled_gpu(
+            cfg, bulk_model, bulk_state, phys, grid, coll, topo, N0,
+            gpu_context, ch=ch, start_tau=start_tau,
+        )
     result["topology_timing"] = topo_timing
     result["storage_estimate"] = storage
-    report_result(result, cfg, phys, grid)
+    report_result(result, kinetic_cfg, phys, grid)
     if cfg.write_output:
         save_result(
             cfg.output, result, cfg, phys, grid, coll, ch=ch,
@@ -2917,6 +3556,13 @@ def main():
         print(f"wrote {cfg.output}")
     else:
         print("output writing disabled by [output].write=false")
+    if bulk_model is not None and cfg.bulk.restart_out is not None:
+        save_result(
+            cfg.bulk.restart_out, result, cfg, phys, grid, coll, ch=ch,
+            input_config_path=config_path.expanduser().resolve(),
+            input_config_toml=config_text,
+        )
+        print(f"wrote coupled restart {cfg.bulk.restart_out}")
     print(f"total wall={time.perf_counter()-t0:.3f} s")
 
 

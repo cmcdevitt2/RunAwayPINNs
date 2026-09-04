@@ -46,12 +46,9 @@ coefficients remain in their native units (`cm^3 s^-1` for ACD/SCD and
 `W cm^3` for PLT/PRB), with the radiated-power helper converting the result to
 `W m^-3`.
 
-The current forward executable still uses its prescribed ion table. The
-OpenADAS reader and `bulk_plasma_model.py` now provide the tested host-side
-collisional-radiative, bulk-energy, induction, and TR--BDF2 stage-current
-subsystem. `BulkSpecies.screening_inputs()` carries explicit per-charge
-excitation energies and screening lengths; it never substitutes ionization
-energies or a mean charge. These pieces are not silently activated by the
-existing standalone TOML case. The GPU kinetic driver still needs stage
-iteration, dynamic coefficient rebuild/refactorization, and coupled
-restart/output handling.
+The existing TOML case remains standalone and uses its prescribed ion table.
+An enabled `[bulk]` case loads local bundles, rejects missing per-charge
+excitation/screening inputs, iterates kinetic current with host CR/energy/
+induction stages, updates CSR numerical values, and refactorizes cuDSS while
+reusing analyzed topology. Coupled output records bundle hashes/ranges,
+D-via-H mapping, bulk populations, stage residuals, and restart state.
