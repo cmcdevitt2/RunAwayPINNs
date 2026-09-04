@@ -9,7 +9,9 @@ GPU residency, cuDSS use, and reproducibility as first-class requirements.
 
 ## Operating mode
 
-- Read `README.md`, the relevant TOML, and targeted symbols before broad scans.
+- Read `README.md`, then all documentation in `docs/` when that directory
+  exists—especially `docs/CODEX_WORKFLOW.md` and `docs/HIPERGATOR.md`—before
+  reading the relevant TOML, code, or targeted symbols.
 - Keep changes narrow. Do not add dependencies, abstractions, or output schemas
   without a concrete requirement.
 - Preserve unrelated parent-repository changes; stage exact paths only.
