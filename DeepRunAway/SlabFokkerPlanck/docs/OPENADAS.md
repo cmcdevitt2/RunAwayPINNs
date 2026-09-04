@@ -19,21 +19,20 @@ python scripts/fetch_openadas.py \
   --data-dir data/openadas/Ar89
 ```
 
-The current local inventory contains complete `Ar89` and `Ne89` bundles
-(argon and neon), each with ACD, SCD, PLT, and PRB files. These files remain
-ignored by Git. Recreate the neon bundle with:
+The current local inventory contains complete `Ar89`, `Ne89`, and `H89`
+bundles (argon, neon, and hydrogen), each with ACD, SCD, PLT, and PRB files.
+The `H89` bundle is the ADF11 data used for deuterium. These files remain
+ignored by Git. Recreate the neon and deuterium-input bundles with:
 
 ```bash
 source ../.venv/bin/activate
 python scripts/fetch_openadas.py --element Ne --year 89 --data-dir data/openadas/Ne89
+python scripts/fetch_openadas.py --element H --year 89 --data-dir data/openadas/H89
 ```
 
-OpenADAS does not provide a matching full ACD/SCD/PLT/PRB unresolved bundle
-under the isotope symbol `D`. Deuterium-specific entries are published in
-other ADF11 classes (for example, PRC charge-exchange power); the current
-helper intentionally does not fetch or relabel hydrogen data as deuterium.
-Select and integrate those isotope-specific classes explicitly when the bulk
-plasma model defines its deuterium treatment.
+For this project, map deuterium to the `H89` ADF11 tables when constructing
+the collisional-radiative inputs; do not request a separate `D89` elemental
+bundle. The isotope mass remains a separate plasma-model parameter.
 
 The available year and class combination must be checked on the
 [OpenADAS ADF11 listing](https://open.adas.ac.uk/adf11). For example, the
