@@ -88,6 +88,10 @@ Keep all inputs, logs, datasets, models, plots, and caches in the checkout's
 ignored paths or `$PSCRATCH`; do not use `/tmp`, `$TMPDIR`, `mktemp`, or
 node-local temporary directories.
 
+Perlmutter project cap: one active interactive job maximum, and no more than
+half of any finite current QOS node limit. Current caps are 2 interactive
+nodes and 4 debug nodes. Ordinary SlabRpfPinn jobs request one node.
+
 Start with a reduced grid, case count, collocation set, and optimizer budget.
 Scale only after one complete batch job passes backend, parity, residual, and
 memory checks. cuDSS workspace and fill can dominate memory beyond raw CSR size.

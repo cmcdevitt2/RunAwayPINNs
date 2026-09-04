@@ -52,6 +52,13 @@ CPU cores and 64 GB of host RAM; that is not enough for this project's
 ordinary 28-thread contract. Use a whole-node QOS/resource shape when 28 host
 threads or cuDSS workspace require it.
 
+Project scheduling rule: run at most one active interactive job. Request no
+more than half of any finite current QOS node limit. Therefore current
+`interactive` limit 4 permits at most 2 project-requested nodes, and current
+`debug` limit 8 permits at most 4. Recheck NERSC policy when limits change;
+never increase project limits automatically. Use one node for ordinary
+SlabRpfPinn FV/PINN work unless a separate resource plan authorizes more.
+
 The `--cpus-per-task` value is in logical CPUs on Perlmutter (two hardware
 threads per physical core). The project contract is 28 total host threads,
 so keep one task, request 28 CPUs, and cap threaded libraries explicitly:
@@ -94,7 +101,8 @@ salloc --nodes=1 --qos=interactive --time=01:00:00 \
 NERSC documents a GPU account requirement for interactive Perlmutter jobs;
 use the GPU-enabled account shown for the user/project. The live allocation
 for this project maps `m5276` to `m5276_g`; do not infer an account or QOS from
-the Hipergator scripts.
+the Hipergator scripts. Do not start a second interactive allocation while one
+project interactive job is active.
 
 After `salloc` grants the node, run the setup and smoke checks in that shell:
 
