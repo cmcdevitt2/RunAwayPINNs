@@ -1,0 +1,21 @@
+__pycache__/
+.ipynb_checkpoints/
+*.py[cod]
+
+data/
+outputs/
+logs/
+models/
+*.npz
+*.png
+
+# Local environments and editor state
+.venv/
+.env
+.vscode/
+.idea/
+
+# Retained legacy material; not part of the committed solver package
+configs/
+runaway_0d2p_warp_cudss_gpu_r7_5.py
+runaway_0d2p_case.toml

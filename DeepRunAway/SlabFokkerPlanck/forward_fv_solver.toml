@@ -1,0 +1,75 @@
+# Standalone GPU 0D-2P relativistic electron kinetic research case.
+# All momenta are normalized to m_e c. Time is normalized to tau_ref.
+# Numerical convergence remains the responsibility of each scientific study.
+
+[plasma]
+te_eV = 1000.0
+ne_m3 = 1.0e20
+e_parallel_Vm = 0.0
+B_T = 0.0
+# Optional normalization/knock-on overrides. Omit to use the physical defaults.
+# nt_m3 = 1.0e20
+# n_ref_m3 = 1.0e20
+# ln_lambda_ref = 14.9
+
+# Ion tables determine Z_eff and, when Z0 < Z, activate the common Hesslow
+# partial-screening drag and pitch-deflection overlay.
+[[plasma.ions]]
+name = "D"
+Z = 1
+Z0 = 1
+density_m3 = 1.0e20
+I_eV = 0.0
+a_bar = 0.0
+
+[collisions]
+# "finite-temperature-relativistic" or
+# "fully-relativistic-asymptotically-matched"
+model = "finite-temperature-relativistic"
+energy_diffusion = true
+# Used by the finite-temperature collision-function quadrature.
+q_coll = 48
+
+[avalanche]
+enabled = true
+p_m = 0.1
+
+[grid]
+Np = 1024
+Nxi = 256
+pmin = 0.0
+pmax = 8.0
+inner_boundary = "zero-flux"   # "zero-flux" or "absorbing"; absorbing requires pmin > 0
+
+[time]
+dtau = 1.0e-3
+tau_end = 0.1
+
+[initial]
+kind = "maxwell-juttner"        # "maxwell-juttner" or "gaussian"
+q_init = 16
+# Omit te_eV/density_m3 to use the plasma temperature/density.
+# te_eV = 1000.0
+# density_m3 = 1.0e20
+gaussian_p0 = 0.6
+gaussian_sigma_p = 0.15
+gaussian_xi0 = -0.8
+gaussian_sigma_xi = 0.15
+
+[seed]
+fraction = 0.0
+p0 = 1.0
+sigma_p = 0.10
+xi0 = -0.95
+sigma_xi = 0.05
+
+[runtime]
+device = "cuda:0"
+balance_check = true
+
+[output]
+write = true
+path = "runaway_0d2p_output.npz"
+# Full 2-D snapshots and scalar diagnostics are independent. Zero means endpoints only/no interiors.
+save_every = 0
+diag_every = 10
