@@ -8,6 +8,7 @@ editing, inspection, syntax/config checks, and submission only.
 From `DeepRunAway/SlabFokkerPlanck`:
 
 ```bash
+# The shared project environment is DeepRunAway/.venv.
 source ../.venv/bin/activate
 python -m py_compile forward_fv_solver.py
 python - <<'PY'
@@ -59,6 +60,7 @@ cat > /tmp/slab-fp.slurm <<'SLURM'
 
 set -euo pipefail
 cd "$SLURM_SUBMIT_DIR"
+# From SlabFokkerPlanck, ../.venv is DeepRunAway/.venv.
 source ../.venv/bin/activate
 export PYTHONUNBUFFERED=1
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"

@@ -33,12 +33,16 @@ storage, controls scaling; a 4096x2048 mesh used about 10.6 GiB peak and an
 
 ## Quick start
 
-Run only inside an allocated GPU job, using the neighboring environment:
+The project virtual environment is `DeepRunAway/.venv`. From this directory it
+is addressed as `../.venv`. Run the solver only inside an allocated GPU job:
 
 ```bash
 source ../.venv/bin/activate
 python forward_fv_solver.py --config forward_fv_solver.toml
 ```
+
+Use the same `../.venv` activation in every Slurm batch script; do not use a
+separate environment under `SlabFokkerPlanck`.
 
 Login nodes are for inspection, syntax checks, and submission. Use
 `docs/HIPERGATOR.md` for Slurm templates, resource sizing, diagnostics, and

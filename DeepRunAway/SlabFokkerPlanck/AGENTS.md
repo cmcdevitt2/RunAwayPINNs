@@ -50,7 +50,8 @@ edit ownership.
 - Keep Warp, cuDSS, and any future JAX component on the same CUDA device.
 - Production runs require Slurm GPU batch jobs on Hipergator. Login nodes are for
   inspection, syntax/config checks, and submission. Never accept CPU fallback.
-- Use the neighboring `../.venv` environment from this directory.
+- Use `DeepRunAway/.venv`; from this directory its relative path is `../.venv`.
+  Activate it for all Python checks and inside every GPU batch script.
 - Keep generated data, logs, plots, caches, and scratch outputs out of Git.
 
 ## Verification ladder

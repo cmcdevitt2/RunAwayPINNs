@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import re
 import urllib.request
 
 
@@ -27,6 +28,13 @@ def sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1 << 20), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def validate_adf11_download(path: Path) -> None:
+    """Reject successful HTML/error pages returned by the download endpoint."""
+    lines = path.read_text(encoding="ascii", errors="replace").splitlines()
+    if not lines or re.match(r"^\s*\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+", lines[0]) is None:
+        raise RuntimeError(f"download is not a standard unresolved ADF11 file: {path}")
 
 
 def fetch(element: str, year: int, target: Path, classes: tuple[str, ...], force: bool) -> Path:
@@ -43,6 +51,7 @@ def fetch(element: str, year: int, target: Path, classes: tuple[str, ...], force
             partial = output.with_suffix(output.suffix + ".part")
             try:
                 urllib.request.urlretrieve(url, partial)
+                validate_adf11_download(partial)
                 partial.replace(output)
             except Exception:
                 partial.unlink(missing_ok=True)

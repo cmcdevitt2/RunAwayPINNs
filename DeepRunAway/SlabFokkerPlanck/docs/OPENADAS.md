@@ -19,6 +19,22 @@ python scripts/fetch_openadas.py \
   --data-dir data/openadas/Ar89
 ```
 
+The current local inventory contains complete `Ar89` and `Ne89` bundles
+(argon and neon), each with ACD, SCD, PLT, and PRB files. These files remain
+ignored by Git. Recreate the neon bundle with:
+
+```bash
+source ../.venv/bin/activate
+python scripts/fetch_openadas.py --element Ne --year 89 --data-dir data/openadas/Ne89
+```
+
+OpenADAS does not provide a matching full ACD/SCD/PLT/PRB unresolved bundle
+under the isotope symbol `D`. Deuterium-specific entries are published in
+other ADF11 classes (for example, PRC charge-exchange power); the current
+helper intentionally does not fetch or relabel hydrogen data as deuterium.
+Select and integrate those isotope-specific classes explicitly when the bulk
+plasma model defines its deuterium treatment.
+
 The available year and class combination must be checked on the
 [OpenADAS ADF11 listing](https://open.adas.ac.uk/adf11). For example, the
 current unresolved argon listing provides 1989 ACD/SCD/PLT/PRB files, while
