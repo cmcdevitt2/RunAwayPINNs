@@ -4,7 +4,7 @@
 \usepackage{booktabs}
 \usepackage{hyperref}
 
-\title{Standalone 0D--2P Relativistic Electron Fokker--Planck Model\\Physical and Numerical Reference}
+\title{0D--2P Relativistic Electron Fokker--Planck Model\\Physical and Numerical Reference}
 \author{}
 \date{September 2026}
 
@@ -20,13 +20,13 @@
 
 \noindent
 This document specifies the spatially homogeneous 0D--2P forward relativistic
-electron Fokker--Planck model and its GPU finite-volume realization.  The model
+electron Fokker--Planck model and its GPU finite-volume realization.  Standalone mode
 includes electric-field acceleration, relativistic small-angle collisions,
 synchrotron radiation reaction, and an optional Chiu--Harvey large-angle
-secondary-electron source.  Plasma quantities are prescribed and constant for
-the present solver.  Future work will exchange state and source information
-with a time-dependent bulk plasma model while preserving the conservative
-finite-volume and direct-solver contracts defined here.
+secondary-electron source.  Standalone mode uses a prescribed constant plasma
+state.  An optional bulk-plasma driver is implemented and exchanges stage plasma
+states and kinetic current moments while preserving the conservative finite-volume
+and direct-solver contracts defined here.
 
 The numerical reference covers the dimensional and normalized equations, fixed
 coefficient construction, conservative cell-content discretization, boundary
@@ -42,10 +42,10 @@ and numerical conventions retained below are the authority for
 \section{Physical model}
 
 The present model is a spatially homogeneous, gyrotropic electron kinetic system in
-momentum magnitude and pitch angle.  All plasma quantities are prescribed and constant
-in time.  Plasma evolution, spatial transport, and kinetic--bulk feedback are outside
-the current standalone problem; they are specified as future coupling requirements in
-Sec.~\ref{sec:future_bulk_coupling}.  The physical system is defined below in dimensional
+momentum magnitude and pitch angle.  Standalone mode prescribes all plasma quantities
+and holds them constant in time.  The optional coupled driver evolves a host-side bulk
+state and supplies stage plasma states and kinetic current moments; spatial transport
+remains outside the current model.  The physical system is defined below in dimensional
 form.  No reference normalization used by the numerical solver is introduced until the
 final subsection of this section.
 
@@ -590,12 +590,13 @@ density; in the standalone solver it is an explicit prescribed physical input.
 
 \subsection{Prescribed plasma state, initial condition, and moments}
 
-For the present constant-parameter problem, the prescribed quantities
+For standalone mode, the prescribed quantities
 \begin{equation}
  \left\{T_e,n_e,E_\parallel,B,n_a,Z_a,Z_{0a},I_a,\bar a_a,n_t,P_m\right\}
 \end{equation}
 are constant in time.  Consequently every coefficient in
-Eq.~\eqref{eq:dimensional_kinetic} is time independent.
+Eq.~\eqref{eq:dimensional_kinetic} is time independent.  In coupled mode, the same
+physical coefficient construction is reevaluated at each bulk stage.
 
 The initial condition is an arbitrary non-negative gyrotropic distribution
 \begin{equation}
@@ -701,12 +702,13 @@ differential cross section in Eq.~\eqref{eq:ch_knockon_cross_section},
 \end{equation}
 This normalization is used by the Chiu--Harvey source.  For constant prescribed plasma
 parameters, all selected local coefficients and the Chiu--Harvey map are constant in
-time.
+time.  The coupled driver uses the same normalization while updating stage-dependent
+plasma coefficients.
 
 \section{Numerical model}
 %===============================================================================
 
-The numerical problem is the constant-coefficient normalized forward equation
+The standalone numerical problem is the constant-coefficient normalized forward equation
 \eqref{eq:normalized_forward}.  The small-angle configuration selects either the
 finite-temperature relativistic or fully-relativistic asymptotically matched thermal-log
 base coefficient set.  Independently of that choice, the common energy-dependent
@@ -717,8 +719,9 @@ energy-dependent Coulomb logarithms remain part of the physical collision coeffi
 The large-angle gain is either disabled or Chiu--Harvey.  Every configuration uses the same physical
 finite-volume state in the phase-space measure $2\pi p^2\,dp\,d\xi$ and is advanced as
 part of one fully implicit linear kinetic operator.  For fixed physical parameters,
-configuration, mesh, and timestep, the semidiscrete operator is linear and time
-independent.
+configuration, mesh, and timestep, the standalone semidiscrete operator is linear and
+time independent.  The coupled driver retains linear kinetic stages but updates
+coefficients from host-side bulk stage states.
 
 \subsection{Finite-volume grid, representative points, and discrete state}
 
@@ -1137,38 +1140,44 @@ Integrating the differential part of Eq.~\eqref{eq:normalized_forward} over a ce
 Each interior face flux is formed once and enters the two adjacent cells with opposite
 signs.  Interior conservation is therefore algebraic rather than approximate.
 
-The drift terms are discretized with first-order upwinding and the diffusion terms with
-centered finite differences.  This deliberately simple choice is the baseline numerical
-scheme for the present solver.  Higher-order or exponentially fitted Fokker--Planck
-schemes are outside the scope of the present model and may be considered only after the
-first-order formulation is fully qualified.
+The local drift--diffusion fluxes use the exponentially fitted Bernoulli form of the
+Chang--Cooper discretization.  When the diffusion coefficient vanishes, the implementation
+reduces to first-order upwinding.  This deliberately simple conservative choice is the
+baseline numerical scheme for the present solver.  Higher-order schemes are outside the
+scope of the present model and may be considered only after this formulation is fully
+qualified.
+
+Define the numerically stable Bernoulli function
+\begin{equation}
+ \mathcal B(z)=\frac{z}{e^z-1},\qquad \mathcal B(0)=1.
+ \label{eq:bernoulli_function}
+\end{equation}
 
 For an interior radial face, define
 \begin{equation}
  A^p_{i+1/2,j}=A_p(p_{i+1/2},\xi_j),\qquad
  C_{A,i+1/2}=C_A^{({\rm sel})}(p_{i+1/2}),
 \end{equation}
-and the upwind face value
+and the face Peclet argument
 \begin{equation}
- f^{p,\mathrm{up}}_{i+1/2,j}=
- \begin{cases}
-   f_{ij}, & A^p_{i+1/2,j}\ge 0,\\
-   f_{i+1,j}, & A^p_{i+1/2,j}<0.
- \end{cases}
- \label{eq:radial_upwind_state}
+ w^p_{i+1/2,j}=\frac{A^p_{i+1/2,j}\Delta p}{C_{A,i+1/2}}.
+ \label{eq:radial_peclet}
 \end{equation}
-The integrated radial face flux is then
+For $C_{A,i+1/2}>0$, the integrated radial face flux is
 \begin{equation}
  F^p_{i+1/2,j}
  =2\pi p_{i+1/2}^2\Delta\xi
  \left[
- A^p_{i+1/2,j}f^{p,\mathrm{up}}_{i+1/2,j}
- -C_{A,i+1/2}
- \frac{f_{i+1,j}-f_{ij}}{\Delta p}
+ \frac{C_{A,i+1/2}}{\Delta p}
+ \left(
+   \mathcal B(-w^p_{i+1/2,j})f_{ij}
+  -\mathcal B(w^p_{i+1/2,j})f_{i+1,j}
+ \right)
  \right].
  \label{eq:radial_fv_flux}
 \end{equation}
-Thus radial advection is first-order upwind, while physical energy diffusion is centered.
+When $C_{A,i+1/2}=0$, Eq.~\eqref{eq:radial_fv_flux} is replaced by its first-order
+upwind drift limit.
 
 For an interior pitch face, define
 \begin{equation}
@@ -1178,30 +1187,29 @@ For an interior pitch face, define
  A^\xi_{i,j+1/2}=A_\xi(p_i,\xi_{j+1/2}),\qquad
  D^\xi_{i,j+1/2}=D_\xi(p_i,\xi_{j+1/2}),
 \end{equation}
-and
+and the face Peclet argument
 \begin{equation}
- f^{\xi,\mathrm{up}}_{i,j+1/2}=
- \begin{cases}
-   f_{ij}, & A^\xi_{i,j+1/2}\ge 0,\\
-   f_{i,j+1}, & A^\xi_{i,j+1/2}<0.
- \end{cases}
- \label{eq:pitch_upwind_state}
+ w^\xi_{i,j+1/2}=\frac{A^\xi_{i,j+1/2}\Delta\xi}{D^\xi_{i,j+1/2}}.
+ \label{eq:pitch_peclet}
 \end{equation}
-The integrated pitch face flux is
+For $D^\xi_{i,j+1/2}>0$, the integrated pitch face flux is
 \begin{equation}
  F^\xi_{i,j+1/2}
  =\frac{2\pi}{3}
   \left(p_{i+1/2}^3-p_{i-1/2}^3\right)
  \left[
- A^\xi_{i,j+1/2}f^{\xi,\mathrm{up}}_{i,j+1/2}
- -D^\xi_{i,j+1/2}
- \frac{f_{i,j+1}-f_{ij}}{\Delta\xi}
+ \frac{D^\xi_{i,j+1/2}}{\Delta\xi}
+ \left(
+   \mathcal B(-w^\xi_{i,j+1/2})f_{ij}
+  -\mathcal B(w^\xi_{i,j+1/2})f_{i,j+1}
+ \right)
  \right].
  \label{eq:pitch_fv_flux}
 \end{equation}
-The same first-order-upwind/centered-diffusion rule is therefore used in both momentum
-coordinates.  Accuracy is obtained by mesh refinement rather than by introducing a more
-elaborate spatial discretization at this stage.
+When $D^\xi_{i,j+1/2}=0$, Eq.~\eqref{eq:pitch_fv_flux} is replaced by its first-order
+upwind drift limit.  The same Bernoulli/Chang--Cooper rule is therefore used in both
+momentum coordinates.  Accuracy is obtained by mesh refinement rather than by
+introducing a more elaborate spatial discretization at this stage.
 The superscript ``sel'' emphasizes that the stencil is independent of the selected
 small-angle collision model; only the precomputed coefficient values differ.
 
@@ -1246,7 +1254,7 @@ is tested by increasing $p_{\max}$ while holding $\Delta p$ fixed.
 The large-angle configuration is selected independently of the small-angle collision
 model.  It is either disabled, $L_{\rm LA}=0$, or the Chiu--Harvey gain is enabled.  For
 constant prescribed plasma parameters the Chiu--Harvey source is a fixed linear map of
-the evolving finite-volume state and is retained in the same fully implicit BE/BDF2
+the evolving finite-volume state and is retained in the same fully implicit TR--BDF2
 operator.
 
 \paragraph{Chiu--Harvey finite-energy aligned-primary gain.}
@@ -1414,72 +1422,100 @@ For the zero-flux production inner boundary $\Phi_{\rm in}=0$; it can be nonzero
 shifted absorbing boundary.  For Chiu--Harvey the production term is
 $\bm1^TU_{\rm CH}R_{\rm CH}\bm N$, and it vanishes when the gain is disabled.
 
-\subsection{Fully implicit time stepping}
+\subsection{Fully implicit TR--BDF2 time stepping}
 
-The normalized time grid is uniform,
+For fixed-step standalone mode, the normalized time grid is uniform,
 \begin{equation}
  \tau^n=n\Delta\tau,\qquad n=0,1,\ldots,N_t.
  \label{eq:uniform_time_grid}
 \end{equation}
-The complete selected semidiscrete operator of Eq.~\eqref{eq:semidiscrete} is advanced
-implicitly.  No enabled physical term is lagged, split off, or treated explicitly.
-A single backward-Euler step initializes the two-step method,
-\begin{equation}
- \boxed{\left(I-\Delta\tau L\right)\bm N^1=\bm N^0}
- \label{eq:be}
-\end{equation}
-and every subsequent step uses BDF2,
-\begin{equation}
- \boxed{
- \left(\frac{3}{2}I-\Delta\tau L\right)\bm N^{n+1}
- =2\bm N^n-\frac{1}{2}\bm N^{n-1},\qquad n\ge1.
- }
- \label{eq:bdf2}
-\end{equation}
-For fixed physical parameters, grid, and timestep, the BE and BDF2 matrices are constant
-and differ only in the coefficient multiplying the physical identity.
+Adaptive mode instead accepts a sequence of positive trial steps $h_n$ with
+$\tau^{n+1}=\tau^n+h_n$.  The complete selected semidiscrete operator of
+Eq.~\eqref{eq:semidiscrete} is advanced implicitly.  No enabled physical term is
+lagged, split off, or treated explicitly.
 
-When large-angle gain is disabled, Eqs.~\eqref{eq:be}--\eqref{eq:bdf2} are solved
-directly on the physical state.  With Chiu--Harvey enabled, introduce the radial
-auxiliary state $\bm M=R_{\rm CH}\bm N$.  The exact augmented systems are
+The implemented two-stage TR--BDF2 method uses
+\begin{equation}
+ d=1-\frac{1}{\sqrt{2}},\qquad h=\Delta\tau
+ \quad\text{(or }h=h_n\text{ in adaptive mode)}.
+ \label{eq:trbdf2_parameter}
+\end{equation}
+For a fixed operator $L$, define the common stage matrix
+\begin{equation}
+ \mathcal A_d(h)=I-dhL.
+ \label{eq:trbdf2_stage_matrix}
+\end{equation}
+The first stage is the trapezoidal solution at the intermediate TR--BDF2 stage,
 \begin{equation}
  \boxed{
- \begin{bmatrix}
-  I-\Delta\tau L_0 & -\Delta\tau U_{\rm CH}\\
-  -R_{\rm CH} & I
- \end{bmatrix}
- \begin{bmatrix}\bm N^1\\\bm M^1\end{bmatrix}
- =\begin{bmatrix}\bm N^0\\\bm0\end{bmatrix}
+ \mathcal A_d(h)\bm N^\gamma
+ =\left(I+dhL\right)\bm N^n
+ =2\bm N^n-\mathcal A_d(h)\bm N^n.
  }
- \label{eq:be_augmented}
+ \label{eq:trbdf2_stage1}
 \end{equation}
-and
+The endpoint stage uses the same matrix,
 \begin{equation}
  \boxed{
- \begin{bmatrix}
-  \frac32 I-\Delta\tau L_0 & -\Delta\tau U_{\rm CH}\\
-  -R_{\rm CH} & I
- \end{bmatrix}
- \begin{bmatrix}\bm N^{n+1}\\\bm M^{n+1}\end{bmatrix}
- =\begin{bmatrix}2\bm N^n-\frac12\bm N^{n-1}\\\bm0\end{bmatrix}.
+ \mathcal A_d(h)\bm N^{n+1}
+ =\bm N^n+\frac{h}{2\sqrt{2}}
+   \left(L\bm N^n+L\bm N^\gamma\right).
  }
- \label{eq:bdf2_augmented}
+ \label{eq:trbdf2_stage2}
 \end{equation}
-Eliminating $\bm M$ recovers the physical systems with
+Thus each accepted fixed-step advances through two sparse direct solves using the same
+stage matrix; no separate startup scheme is used.
+
+When adaptive stepping is enabled, the embedded error estimate solves the same stage
+matrix with
+\begin{equation}
+ \mathcal A_d(h)\bm e^{n+1}
+ =\bm N^n+h\left(
+ b_0L\bm N^n+b_1L\bm N^\gamma+b_2L\bm N^{n+1}
+ \right)-\bm N^{n+1},
+ \label{eq:trbdf2_error}
+\end{equation}
+where
+\begin{equation}
+ (b_0,b_1,b_2)=
+ (0.2154822031355755,\,0.6868867239266070,\,0.09763107293781750).
+ \label{eq:trbdf2_error_weights}
+\end{equation}
+The scaled norm of $\bm e^{n+1}$ controls acceptance and the next trial step.  If a
+trial step changes, the numerical matrix values are reassembled and cuDSS is
+refactorized while its analyzed CSR topology is reused.
+
+With Chiu--Harvey enabled, introduce the radial auxiliary state
+$\bm M=R_{\rm CH}\bm N$.  The stage matrix is the exact augmented system
+\begin{equation}
+ \boxed{
+ \mathcal A_{d,\rm aug}(h)=
+ \begin{bmatrix}
+  I-dhL_0 & -dhU_{\rm CH}\\
+  -R_{\rm CH} & I
+ \end{bmatrix}.
+ }
+ \label{eq:trbdf2_augmented_matrix}
+\end{equation}
+The right-hand side is the corresponding physical TR--BDF2 stage right-hand side
+with a zero auxiliary block.  Eliminating $\bm M$ recovers
 $L=L_0+U_{\rm CH}R_{\rm CH}$ exactly.  The auxiliary constraint contains no time
-derivative, so its identity block is unchanged between BE and BDF2.
+derivative, so its identity block is unchanged between stages.
 
-Implicit treatment removes explicit stability restrictions associated with stiff
-collision and advection terms, but not the timestep requirement for accuracy.  The
-accepted $\Delta\tau$ is therefore established by temporal refinement, and cell contents
-are monitored for loss of non-negativity.
+In coupled mode, each TR--BDF2 stage obtains a host-side bulk state and kinetic current
+guess.  The kinetic coefficient values and Chiu--Harvey stage map are rebuilt from that
+state, while the fixed CSR topology is retained and numerical values are refactorized.
+The coupled stage fixed-point iteration must converge before the timestep is accepted.
+Implicit treatment removes explicit stability restrictions associated with stiff collision
+and advection terms, but not the timestep requirement for accuracy.  Cell contents are
+monitored for loss of non-negativity.
 
 \subsection{Sparse direct solution on the GPU}
 
 The local physical block always has the same finite-volume stencil.  Changing between
 the two small-angle collision models changes coefficient values but not the CSR topology.
 The Chiu--Harvey configuration adds the exact low-dimensional radial auxiliary system of
-Eqs.~\eqref{eq:be_augmented}--\eqref{eq:bdf2_augmented}.
+Eq.~\eqref{eq:trbdf2_augmented_matrix}.
 
 For one constant-parameter simulation, the direct-solve procedure is:
 \begin{enumerate}
@@ -1489,15 +1525,18 @@ For one constant-parameter simulation, the direct-solve procedure is:
  \item if Chiu--Harvey is enabled, construct its fixed target geometry and the exact
        reduction/scatter maps $R_{\rm CH}$ and $U_{\rm CH}$;
  \item construct and validate the fixed CSR graph for the physical or augmented system;
- \item assemble the backward-Euler matrix;
+ \item assemble the common TR--BDF2 stage matrix;
  \item perform one sparse symbolic analysis of that fixed graph;
- \item numerically factor the backward-Euler matrix and solve the startup step;
- \item change only the physical diagonal coefficient from $1$ to $3/2$;
- \item numerically factor the BDF2 matrix once while reusing symbolic analysis, then use
-       the retained factorization for all subsequent timesteps.
+ \item numerically factor the stage matrix and solve the intermediate TR stage;
+ \item solve the endpoint TR--BDF2 stage with the retained factorization;
+ \item in adaptive standalone mode, reassemble and refactor numerical values when the
+       trial timestep changes while reusing the analyzed topology;
+ \item in coupled mode, update numerical values for each bulk stage and refactorize while
+       reusing the analyzed topology.
 \end{enumerate}
-After startup, every timestep requires only the BDF2 right-hand side and one sparse
-triangular solve with the retained factorization.
+Each accepted fixed-step requires two sparse direct solves.  An adaptive step also uses
+the embedded error-estimate solve.  Coefficient or timestep changes require numerical
+refactorization but not CSR symbolic reanalysis when topology remains unchanged.
 
 For Chiu--Harvey, the exact augmented graph contains the local physical stencil, one
 auxiliary-column coupling for each active target, and $N_p$ radial constraints
@@ -1636,7 +1675,7 @@ whether the resulting physical model reproduces established kinetic results.
 
  \item \textbf{Spatial convergence of the kinetic equation.}
        Smooth verification problems must recover first-order asymptotic convergence with
-       respect to the upwinded directions as $\Delta p$ and $\Delta\xi$ are independently
+       respect to the first-order drift discretization as $\Delta p$ and $\Delta\xi$ are independently
        reduced.  Production configurations must then be continued to finer meshes until
        the full distribution and reported moments are insensitive to further refinement.
 
@@ -1650,8 +1689,8 @@ whether the resulting physical model reproduces established kinetic results.
  \item \textbf{Chiu--Harvey algebraic factorization, when selected.}
        On a fixed mesh and state, the pitch-reduction/scatter application must agree with
        the explicitly expanded $N_\xi$-term source sum to floating-point accuracy.  The
-       augmented BE and BDF2 systems must reproduce the physical solution of the expanded
-       systems to the accuracy permitted by the sparse residual, and
+       augmented TR--BDF2 stages must reproduce the physical solution of the expanded
+       stages to the accuracy permitted by the sparse residual, and
        $\bm M=R_{\rm CH}\bm N$ must hold to floating-point accuracy.
 
  \item \textbf{Outer-domain convergence.}
@@ -1661,14 +1700,15 @@ whether the resulting physical model reproduces established kinetic results.
 
  \item \textbf{Temporal convergence.}
        With a spatially converged mesh, reducing $\Delta\tau$ must recover second-order
-       convergence of the fully implicit BDF2 evolution over a fixed physical interval,
-       including the single backward-Euler startup step.
+       convergence of the fully implicit TR--BDF2 evolution over a fixed physical
+       interval.  Adaptive runs must also demonstrate error-controlled step acceptance
+       and stable convergence under timestep refinement.
 
  \item \textbf{Sparse direct solve.}
-       Every BE and BDF2 solve must satisfy Eq.~\eqref{eq:linear_residual}; the residual
-       must remain small compared with the demonstrated spatial and temporal
-       discretization errors.  Any active auxiliary constraint must satisfy its separate
-       defect check.
+       Every TR--BDF2 stage solve and adaptive error-estimate solve must satisfy
+       Eq.~\eqref{eq:linear_residual}; the residual must remain small compared with the
+       demonstrated spatial and temporal discretization errors.  Any active auxiliary
+       constraint must satisfy its separate defect check.
 \end{enumerate}
 
 Unresolved coarse meshes may be used for algebraic, indexing, and implementation tests,
@@ -1678,38 +1718,40 @@ directly for each selected physical configuration.
 
 
 %===============================================================================
-\section{Future bulk-plasma coupling}
-\label{sec:future_bulk_coupling}
+\section{Implemented bulk-plasma coupling and remaining qualification}
+\label{sec:bulk_coupling}
 
-The standalone solver currently advances the kinetic distribution using a prescribed,
-constant plasma state.  A future coupled driver will evolve a bulk plasma model and
-exchange the quantities needed to update the kinetic coefficients and source terms.
-That extension must be defined explicitly rather than inferred from the present
-configuration file.
+Standalone mode remains the reference calculation: it advances the kinetic distribution
+using a prescribed, constant plasma state.  The code also implements an optional coupled
+GPU driver.  Its nonlinear bulk work is host-side and its kinetic state, CSR graph,
+numerical values, and cuDSS vectors remain on one CUDA device.
 
-At minimum, the coupled formulation must specify:
+The implemented coupling contract is:
 \begin{itemize}
-  \item the bulk state variables exchanged with the kinetic solver, including density,
-        temperature, electric field, magnetic field, ionization state, and any source
-        or loss rates;
-  \item the coupling cadence and whether the bulk state is held fixed during a kinetic
-        step or iterated to a coupled time-level convergence;
-  \item the coefficient and Chiu--Harvey source update, including which GPU arrays are
-        updated in place and which require host preprocessing;
-  \item conservation equations for particle, energy, and charge exchange, with a
-        defined sign convention and diagnostics on both sides of the interface;
-  \item the sparse-topology policy: unchanged mesh topology may reuse cuDSS analysis
-        and use numerical refactorization, while changed sparsity requires rebuilding
-        and requalifying the CSR graph; and
-  \item restart data containing the bulk state, kinetic state, time level, configuration,
-        solver metadata, and enough provenance to reproduce the coupling decision.
+  \item the host bulk state contains electron temperature, charge-state populations for
+        every coupled species, and total current; electron density and parallel electric
+        field are derived by the bulk model.  The magnetic field remains the prescribed
+        $B_T$ configuration parameter and is not currently exchanged;
+  \item each accepted kinetic timestep performs TR--BDF2 intermediate and endpoint
+        bulk stages.  Kinetic current moments feed the bulk stages, and a fixed-point
+        iteration continues until the configured scaled stage residual converges;
+  \item each bulk stage rebuilds host coefficient arrays and GPU CSR numerical values,
+        while the fixed mesh topology and cuDSS symbolic analysis are retained;
+  \item particle/current, bulk-energy, collisional-radiative, Ohmic, and lumped-induction
+        terms are evaluated by the implemented host bulk model and reported through
+        stage diagnostics; and
+  \item local OpenADAS ADF11 bundles and authoritative state-resolved excitation and
+        screening data are required for each coupled species.  Coupled restart output
+        stores the kinetic state, bulk temperature, charge populations, current, time,
+        configuration, solver metadata, and OpenADAS provenance.
 \end{itemize}
 
-The coupled implementation should first be qualified against a prescribed-state run
-using identical coefficients.  It should then demonstrate conservation and coefficient
-parity over representative bulk states, compare topology reuse with full rebuilds, and
-test timestep, mesh, and coupling-cadence refinement.  Until those checks are complete,
-the standalone forward solver remains the reference calculation.
+Coupling remains implemented but not fully qualified.  Required qualification includes
+comparison against a prescribed-state run with identical coefficients, particle/energy/
+current conservation across the exchange, coefficient parity over representative bulk
+states, topology reuse versus full rebuilds, restart equivalence, and timestep, mesh, and
+coupling-cadence refinement.  Until these checks are complete, standalone forward
+evolution remains the reference calculation.
 
 \begin{thebibliography}{99}
 

@@ -119,6 +119,12 @@ QOS permits at most 2 submitted and 2 running interactive jobs per user, with a
 production case that needs more than 30 minutes, and check the current
 [QOS policy](https://docs.nersc.gov/jobs/policy/) before submission.
 
+Project operating limit is stricter: run at most one concurrent interactive
+job and request at most two interactive nodes, half of NERSC's four-node limit.
+Check `squeue --me -q interactive` before requesting an allocation. Release the
+allocation with `exit` after each verification; do not open a second
+interactive session for parallel work.
+
 ### Login-node restrictions and interactive preflight
 
 On a login node, inspect files, parse TOML, inspect modules, and submit jobs;
