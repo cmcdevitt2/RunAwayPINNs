@@ -10,6 +10,9 @@ prescribed bulk-plasma coefficients to a bulk plasma model.
 - `forward_fv_solver.toml`: reproducible example configuration.
 - `forward_fokker_planck_model.tex`: forward-only scientific and numerical
   reference, including the future bulk-plasma coupling scope.
+- `openadas_data.py` and `scripts/fetch_openadas.py`: private OpenADAS ADF11
+  acquisition/provenance and strict-range reader for the future bulk model.
+- `docs/OPENADAS.md`: required ADF11 classes and data-handling workflow.
 - `docs/HIPERGATOR.md`: required Hipergator Slurm/GPU workflow.
 - `docs/CODEX_WORKFLOW.md`: compact Codex development and verification guide.
 
@@ -44,3 +47,8 @@ entrypoint.
 
 Generated outputs, logs, caches, and model data are intentionally excluded
 from Git. Keep large results in scratch or the project data area.
+
+The executable uses the documented Chang--Cooper face flux and TR--BDF2
+stages. Adaptive TR--BDF2 is available through the embedded stiff error
+estimate, while bulk-state coupling and OpenADAS activation remain separate
+integration work.

@@ -8,7 +8,7 @@ Scientific/numerical authority
 
 Execution model
 ---------------
-* NVIDIA GPU only for kinetic assembly, implicit BE/BDF2 time integration, and
+* NVIDIA GPU only for kinetic assembly, implicit TR--BDF2 time integration, and
   sparse direct solves. Warp owns the FP64 CSR matrix/vectors; nvmath-python/
   cuDSS consumes the Warp device pointers on the same CUDA stream.
 * The physical state is the uniform finite-volume (p, xi) state. The optional
@@ -152,6 +152,15 @@ class SolverConfig:
 
     # Runtime/output policy. The production path uses the plain cuDSS direct solve.
     device: str = "cuda:0"
+    adaptive: bool = False
+    rtol: float = 1.0e-4
+    atol: float = 1.0e-12
+    safety: float = 0.9
+    min_factor: float = 0.2
+    max_factor: float = 5.0
+    dtau_min: float = 1.0e-8
+    dtau_max: float | None = None
+    max_steps: int = 100000
     save_every: int = 0
     diag_every: int = 0
     output: Path = Path("runaway_0d2p_output.npz")
@@ -1045,9 +1054,11 @@ def build_balance_test_state(grid: Grid) -> np.ndarray:
 
 
 def nsteps_from_cfg(cfg: SolverConfig) -> int:
+    if cfg.adaptive:
+        return int(math.ceil(cfg.tau_end/cfg.dtau)) if cfg.tau_end > 0.0 else 0
     n = int(round(cfg.tau_end/cfg.dtau))
     if not math.isclose(n*cfg.dtau, cfg.tau_end, rel_tol=1e-12, abs_tol=1e-14):
-        raise ValueError("tau_end must be an integer multiple of dtau")
+        raise ValueError("tau_end must be an integer multiple of dtau when adaptive=false")
     return n
 
 
@@ -1067,6 +1078,18 @@ def _fmt_bytes(nbytes: int) -> str:
     return f"{x:.3f} TiB"
 
 
+def cc_bernoulli(x: float) -> float:
+    """Stable Chang--Cooper Bernoulli function B(x)=x/(exp(x)-1)."""
+    if abs(x) < 1.0e-6:
+        x2 = x*x
+        return 1.0 - 0.5*x + x2/12.0 - x2*x2/720.0
+    if x > 50.0:
+        return 0.0
+    if x < -50.0:
+        return -x
+    return x/math.expm1(x)
+
+
 def explicit_storage_estimate(
     cfg: SolverConfig, grid: Grid, topo, ch: CHGeometry | None = None,
 ) -> dict[str, int]:
@@ -1080,7 +1103,9 @@ def explicit_storage_estimate(
     if topo.formulation == "augmented-ch":
         topology += 4*(na + 2*grid.Np)
     values = 8*nnz
-    vectors = 8*(3*nsys + 2*nphys)
+    # RHS/solution, three retained TR--BDF2 states, three CSR products, and
+    # one residual vector, plus the host-projected physical initial state.
+    vectors = 8*(9*nsys + nphys)
     coeff_elems = nphys + 6*grid.Np + 2*grid.Nxi + 4 + na
     coefficients = 8*coeff_elems
     explicit_gpu = topology + values + vectors + coefficients
@@ -1132,6 +1157,19 @@ def print_storage_preflight(
 # =============================================================================
 
 if wp is not None:
+
+    @wp.func
+    def cc_bernoulli_wp(x: wp.float64) -> wp.float64:
+        """Stable GPU Bernoulli function for Chang--Cooper face fluxes."""
+        ax = wp.abs(x)
+        if ax < wp.float64(1.0e-6):
+            x2 = x*x
+            return wp.float64(1.0) - wp.float64(0.5)*x + x2/wp.float64(12.0) - x2*x2/wp.float64(720.0)
+        if x > wp.float64(50.0):
+            return wp.float64(0.0)
+        if x < wp.float64(-50.0):
+            return -x
+        return x/(wp.exp(x)-wp.float64(1.0))
 
     @wp.kernel
     def mark_ch_rows_kernel(
@@ -1383,7 +1421,7 @@ if wp is not None:
 
 
     @wp.kernel
-    def assemble_be_kernel(
+    def assemble_trbdf2_matrix_kernel(
         p_faces: wp.array(dtype=wp.float64),
         p_centers: wp.array(dtype=wp.float64),
         xi_faces: wp.array(dtype=wp.float64),
@@ -1427,14 +1465,16 @@ if wp is not None:
             A = -Ebar*xi - alpha*gam*pf*one_minus - cf_faces[i]
             D = ca_faces[i]
             fac = wp.float64(2.0)*wp.float64(3.14159265358979323846)*pf*pf*dxi
-            advL = wp.float64(0.0)
-            advR = wp.float64(0.0)
-            if A >= wp.float64(0.0):
-                advL = A
+            cL = wp.float64(0.0)
+            cR = wp.float64(0.0)
+            if D > wp.float64(0.0):
+                w = A*dp/D
+                cL = fac*(D/dp)*cc_bernoulli_wp(-w)/cell_volume[row-Nxi]
+                cR = -fac*(D/dp)*cc_bernoulli_wp(w)/cell_volume[row]
+            elif A >= wp.float64(0.0):
+                cL = fac*A/cell_volume[row-Nxi]
             else:
-                advR = A
-            cL = fac*(advL + D/dp)/cell_volume[row-Nxi]
-            cR = fac*(advR - D/dp)/cell_volume[row]
+                cR = fac*A/cell_volume[row]
             values[pm_slot[row]] = -dt*cL
             self_L += cR
         elif inner_boundary_mode == 1:
@@ -1455,14 +1495,16 @@ if wp is not None:
             A = -Ebar*xi - alpha*gam*pf*one_minus - cf_faces[i+1]
             D = ca_faces[i+1]
             fac = wp.float64(2.0)*wp.float64(3.14159265358979323846)*pf*pf*dxi
-            advL = wp.float64(0.0)
-            advR = wp.float64(0.0)
-            if A >= wp.float64(0.0):
-                advL = A
+            cL = wp.float64(0.0)
+            cR = wp.float64(0.0)
+            if D > wp.float64(0.0):
+                w = A*dp/D
+                cL = fac*(D/dp)*cc_bernoulli_wp(-w)/cell_volume[row]
+                cR = -fac*(D/dp)*cc_bernoulli_wp(w)/cell_volume[row+Nxi]
+            elif A >= wp.float64(0.0):
+                cL = fac*A/cell_volume[row]
             else:
-                advR = A
-            cL = fac*(advL + D/dp)/cell_volume[row]
-            cR = fac*(advR - D/dp)/cell_volume[row+Nxi]
+                cR = fac*A/cell_volume[row+Nxi]
             self_L -= cL
             values[pp_slot[row]] = dt*cR
         else:
@@ -1483,14 +1525,16 @@ if wp is not None:
             om = wp.float64(1.0) - xf*xf
             A = om*(-Ebar/p + alpha*xf/gamc)
             D = wp.float64(0.5)*nud_centers[i]*om
-            advL = wp.float64(0.0)
-            advR = wp.float64(0.0)
-            if A >= wp.float64(0.0):
-                advL = A
+            cL = wp.float64(0.0)
+            cR = wp.float64(0.0)
+            if D > wp.float64(0.0):
+                w = A*dxi/D
+                cL = rv*(D/dxi)*cc_bernoulli_wp(-w)/cell_volume[row-1]
+                cR = -rv*(D/dxi)*cc_bernoulli_wp(w)/cell_volume[row]
+            elif A >= wp.float64(0.0):
+                cL = rv*A/cell_volume[row-1]
             else:
-                advR = A
-            cL = rv*(advL + D/dxi)/cell_volume[row-1]
-            cR = rv*(advR - D/dxi)/cell_volume[row]
+                cR = rv*A/cell_volume[row]
             values[xm_slot[row]] = -dt*cL
             self_L += cR
 
@@ -1500,14 +1544,16 @@ if wp is not None:
             om = wp.float64(1.0) - xf*xf
             A = om*(-Ebar/p + alpha*xf/gamc)
             D = wp.float64(0.5)*nud_centers[i]*om
-            advL = wp.float64(0.0)
-            advR = wp.float64(0.0)
-            if A >= wp.float64(0.0):
-                advL = A
+            cL = wp.float64(0.0)
+            cR = wp.float64(0.0)
+            if D > wp.float64(0.0):
+                w = A*dxi/D
+                cL = rv*(D/dxi)*cc_bernoulli_wp(-w)/cell_volume[row]
+                cR = -rv*(D/dxi)*cc_bernoulli_wp(w)/cell_volume[row+1]
+            elif A >= wp.float64(0.0):
+                cL = rv*A/cell_volume[row]
             else:
-                advR = A
-            cL = rv*(advL + D/dxi)/cell_volume[row]
-            cR = rv*(advR - D/dxi)/cell_volume[row+1]
+                cR = rv*A/cell_volume[row+1]
             self_L -= cL
             values[xp_slot[row]] = dt*cR
 
@@ -1568,24 +1614,84 @@ if wp is not None:
 
 
     @wp.kernel
-    def add_diagonal_kernel(
-        diag_slot: wp.array(dtype=wp.int32),
-        delta: wp.float64,
-        values: wp.array(dtype=wp.float64),
+    def fill_aux_state_kernel(
+        physical: wp.array(dtype=wp.float64),
+        physical_n: int,
+        Nxi: int,
+        full_state: wp.array(dtype=wp.float64),
     ):
-        r = wp.tid()
-        s = diag_slot[r]
-        values[s] = values[s] + delta
+        k = wp.tid()
+        acc = wp.float64(0.0)
+        base = k*Nxi
+        for j in range(Nxi):
+            acc += physical[base+j]
+        full_state[physical_n+k] = acc
 
 
     @wp.kernel
-    def build_bdf2_rhs_kernel(
-        y_n: wp.array(dtype=wp.float64),
-        y_nm1: wp.array(dtype=wp.float64),
+    def build_trbdf2_stage1_rhs_kernel(
+        state: wp.array(dtype=wp.float64),
+        applied: wp.array(dtype=wp.float64),
+        physical_n: int,
         rhs: wp.array(dtype=wp.float64),
     ):
         i = wp.tid()
-        rhs[i] = wp.float64(2.0)*y_n[i] - wp.float64(0.5)*y_nm1[i]
+        if i < physical_n:
+            rhs[i] = wp.float64(2.0)*state[i] - applied[i]
+        else:
+            rhs[i] = wp.float64(0.0)
+
+
+    @wp.kernel
+    def build_trbdf2_stage2_rhs_kernel(
+        state_n: wp.array(dtype=wp.float64),
+        applied_n: wp.array(dtype=wp.float64),
+        state_gamma: wp.array(dtype=wp.float64),
+        applied_gamma: wp.array(dtype=wp.float64),
+        physical_n: int,
+        inv_d: wp.float64,
+        rhs: wp.array(dtype=wp.float64),
+    ):
+        i = wp.tid()
+        if i < physical_n:
+            rhs[i] = state_n[i] + inv_d*(
+                wp.float64(0.35355339059327376220)*(state_n[i] - applied_n[i])
+                + wp.float64(0.35355339059327376220)*(state_gamma[i] - applied_gamma[i])
+            )
+        else:
+            rhs[i] = wp.float64(0.0)
+
+
+    @wp.kernel
+    def build_trbdf2_error_rhs_kernel(
+        state_n: wp.array(dtype=wp.float64),
+        applied_n: wp.array(dtype=wp.float64),
+        state_gamma: wp.array(dtype=wp.float64),
+        applied_gamma: wp.array(dtype=wp.float64),
+        state_one: wp.array(dtype=wp.float64),
+        applied_one: wp.array(dtype=wp.float64),
+        physical_n: int,
+        inv_d: wp.float64,
+        rhs: wp.array(dtype=wp.float64),
+    ):
+        i = wp.tid()
+        if i < physical_n:
+            rhs[i] = state_n[i] + inv_d*(
+                wp.float64(0.21548220313557546505)*(state_n[i] - applied_n[i])
+                + wp.float64(0.68688672392660700436)*(state_gamma[i] - applied_gamma[i])
+                + wp.float64(0.09763107293781749796)*(state_one[i] - applied_one[i])
+            ) - state_one[i]
+        else:
+            rhs[i] = wp.float64(0.0)
+
+
+    @wp.kernel
+    def copy_all_kernel(
+        src: wp.array(dtype=wp.float64),
+        dst: wp.array(dtype=wp.float64),
+    ):
+        i = wp.tid()
+        dst[i] = src[i]
 
 
     @wp.kernel
@@ -1991,7 +2097,8 @@ def gpu_relative_residual(row_ptr, col_ind, values, x, b, residual, n: int, devi
 
 def gpu_fv_balance_check(
     cfg: SolverConfig, phys: DerivedPhysics, grid: Grid, coll: CollisionData,
-    topo, row_ptr, col_ind, values, device: str, ch: CHGeometry | None = None,
+    topo, row_ptr, col_ind, values, device: str, matrix_dt: float,
+    ch: CHGeometry | None = None,
 ) -> dict[str, float]:
     test = build_balance_test_state(grid)
     if topo.n > grid.size:
@@ -2006,7 +2113,7 @@ def gpu_fv_balance_check(
               inputs=[row_ptr, col_ind, values, x], outputs=[y], device=device)
     Ay_all = np.asarray(y.numpy(), dtype=np.float64)
     Ay = Ay_all[:grid.size]
-    LN = (test-Ay)/cfg.dtau
+    LN = (test-Ay)/matrix_dt
     lhs = float(np.sum(LN))
     terms = particle_balance_terms(test, cfg, phys, grid, coll, ch=ch)
     rhs = float(terms["net_particle_rate"])
@@ -2032,13 +2139,14 @@ def run_gpu(
     topo: CSRTopology, N0: np.ndarray, gpu_context,
     ch: CHGeometry | None = None,
 ) -> dict:
-    """Assemble once, factor BE/BDF2, and evolve the physical FV state."""
+    """Assemble and solve fixed/adaptive TR--BDF2 stages on the GPU."""
     if wp is None:
         raise RuntimeError("this production script requires warp-lang and a CUDA device")
     nvmath, cudss, dev_obj, runtime = gpu_context
     dev = cfg.device
-    nsteps = nsteps_from_cfg(cfg)
+    fixed_nsteps = nsteps_from_cfg(cfg) if not cfg.adaptive else None
     physical_n = grid.size
+    trbdf2_d = 1.0 - 1.0/math.sqrt(2.0)
 
     def wa(x, dtype):
         return wp.array(np.ascontiguousarray(x), dtype=dtype, device=dev)
@@ -2058,28 +2166,37 @@ def run_gpu(
     ch_active = ch is not None and ch.active_count > 0
     ch_coeff = wa(ch.row_coefficient, wp.float64) if ch_active else None
 
-    # Algebraic RHS/solution span the full augmented system. Retained time
-    # states contain only physical cell contents; auxiliary RHS entries are 0.
+    # Algebraic RHS/solution span the full augmented system. Retained states
+    # include auxiliary radial masses when Chiu--Harvey is active.
     rhs = wp.zeros(topo.n, dtype=wp.float64, device=dev)
     solution = wp.zeros(topo.n, dtype=wp.float64, device=dev)
-    y_nm1 = wa(N0, wp.float64)
-    y_n = wp.zeros(physical_n, dtype=wp.float64, device=dev)
+    state_n = wp.zeros(topo.n, dtype=wp.float64, device=dev)
+    state_gamma = wp.zeros(topo.n, dtype=wp.float64, device=dev)
+    state_one = wp.zeros(topo.n, dtype=wp.float64, device=dev)
+    applied_n = wp.zeros(topo.n, dtype=wp.float64, device=dev)
+    applied_gamma = wp.zeros(topo.n, dtype=wp.float64, device=dev)
+    applied_one = wp.zeros(topo.n, dtype=wp.float64, device=dev)
     residual = wp.zeros(topo.n, dtype=wp.float64, device=dev)
     state_flag = wp.zeros(1, dtype=wp.int32, device=dev)
-    wp.launch(copy_prefix_kernel, dim=physical_n, inputs=[y_nm1], outputs=[rhs], device=dev)
+    initial_physical = wa(N0, wp.float64)
+    wp.launch(copy_prefix_kernel, dim=physical_n, inputs=[initial_physical], outputs=[state_n], device=dev)
+    if ch_active:
+        wp.launch(fill_aux_state_kernel, dim=grid.Np,
+                  inputs=[initial_physical, physical_n, grid.Nxi],
+                  outputs=[state_n], device=dev)
 
-    # Physical block: A = alpha0*I - dtau*L_local. If CH is active, each
+    # Physical block: A = I - d*dtau*L_local. If CH is active, each
     # target row couples to one auxiliary radial pitch sum M_k, and the Np
     # algebraic rows impose M_k - sum_j N[k,j] = 0 exactly.
     t0 = time.perf_counter()
     wp.launch(
-        assemble_be_kernel, dim=physical_n,
+        assemble_trbdf2_matrix_kernel, dim=physical_n,
         inputs=[p_faces, p_centers, xi_faces, xi_centers,
                 radial_volume, cell_volume, cf_faces, ca_faces, nud_centers,
                 topo.diag_slot, topo.pm_slot, topo.pp_slot, topo.xm_slot, topo.xp_slot,
                 grid.Np, grid.Nxi, wp.float64(grid.dp), wp.float64(grid.dxi),
                 wp.float64(phys.Ebar), wp.float64(phys.alpha),
-                wp.float64(cfg.dtau), wp.float64(1.0),
+                wp.float64(trbdf2_d*cfg.dtau), wp.float64(1.0),
                 1 if cfg.inner_boundary == "absorbing" else 0],
         outputs=[values], device=dev,
     )
@@ -2088,7 +2205,7 @@ def run_gpu(
             raise RuntimeError("active Chiu-Harvey source requires augmented CH topology")
         wp.launch(
             add_ch_augmented_kernel, dim=ch.active_count,
-            inputs=[ch_coeff, topo.ch_aux_slot, wp.float64(cfg.dtau)],
+            inputs=[ch_coeff, topo.ch_aux_slot, wp.float64(trbdf2_d*cfg.dtau)],
             outputs=[values], device=dev,
         )
         wp.launch(
@@ -2105,7 +2222,8 @@ def run_gpu(
     balance = None
     if cfg.balance_check:
         balance = gpu_fv_balance_check(
-            cfg, phys, grid, coll, topo, row_ptr, col_ind, values, dev, ch=ch,
+            cfg, phys, grid, coll, topo, row_ptr, col_ind, values, dev,
+            matrix_dt=trbdf2_d*cfg.dtau, ch=ch,
         )
         msg = (
             "finite-volume balance self-check: "
@@ -2127,28 +2245,34 @@ def run_gpu(
     snapshot_times: list[float] = []
     snaps: list[np.ndarray] = []
 
-    def record_intermediate(step: int, arr) -> None:
-        need_diag = should_record_intermediate(step, nsteps, cfg.diag_every)
-        need_snap = should_record_intermediate(step, nsteps, cfg.save_every)
+    def record_intermediate(step: int, t_now: float, arr) -> None:
+        interior = t_now < cfg.tau_end - 1.0e-14*max(1.0, cfg.tau_end)
+        need_diag = interior and cfg.diag_every > 0 and step % cfg.diag_every == 0
+        need_snap = interior and cfg.save_every > 0 and step % cfg.save_every == 0
         if not (need_diag or need_snap):
             return
-        host = np.asarray(arr.numpy(), dtype=np.float64)
+        host = np.asarray(arr.numpy(), dtype=np.float64)[:physical_n]
         if need_diag:
-            times.append(step*cfg.dtau)
+            times.append(t_now)
             dlist.append(diagnostics(host, cfg, phys, grid))
         if need_snap:
             snapshot_steps.append(step)
-            snapshot_times.append(step*cfg.dtau)
+            snapshot_times.append(t_now)
             snaps.append(host.reshape(grid.Np, grid.Nxi))
 
-    def finish(final: np.ndarray, **timings) -> dict:
+    def finish(final: np.ndarray, accepted_steps: int, **timings) -> dict:
         flag = int(np.asarray(state_flag.numpy(), dtype=np.int32)[0])
         if flag >= 2:
             raise FloatingPointError("NaN/Inf occurred in the kinetic state during time integration")
-        final_host = np.asarray(final, dtype=np.float64)
-        if nsteps > 0:
-            times.append(nsteps*cfg.dtau)
+        final_host = np.asarray(final, dtype=np.float64)[:physical_n]
+        if cfg.tau_end > 0.0:
+            times.append(cfg.tau_end)
             dlist.append(diagnostics(final_host, cfg, phys, grid))
+        timings.setdefault("be_residual", timings.get("first_stage_residual", 0.0))
+        timings.setdefault("be_factor_s", timings.get("factorization_s", 0.0))
+        timings.setdefault("be_solve_s", timings.get("first_stage_solve_s", 0.0))
+        timings.setdefault("bdf_factor_s", timings.get("refactorization_s", 0.0))
+        timings.setdefault("mean_bdf_solve_s", timings.get("mean_stage_solve_s", 0.0))
         return {
             "backend": "gpu-warp-cudss",
             "runtime": runtime,
@@ -2162,6 +2286,7 @@ def run_gpu(
             "snapshots": snaps,
             "balance_check": balance,
             "state_monitor_flag": flag,
+            "accepted_steps": accepted_steps,
             "state_change": state_change_norms(final_host, N0),
             "final_particle_rates": particle_balance_terms(
                 final_host, cfg, phys, grid, coll, ch=ch
@@ -2169,13 +2294,12 @@ def run_gpu(
             **timings,
         }
 
-    if nsteps == 0:
-        return finish(
-            N0, be_residual=0.0, last_residual=0.0,
-            assembly_s=assembly_s, analysis_s=0.0,
-            be_factor_s=0.0, be_solve_s=0.0,
-            bdf_factor_s=0.0, mean_bdf_solve_s=0.0,
-        )
+    if cfg.tau_end == 0.0:
+        return finish(N0, 0, first_stage_residual=0.0, last_residual=0.0,
+                      assembly_s=assembly_s, analysis_s=0.0,
+                      factorization_s=0.0, first_stage_solve_s=0.0,
+                      mean_stage_solve_s=0.0, refactorization_s=0.0,
+                      rejected_steps=0)
 
     threading = find_cudss_threading_layer()
     with CudssDirectSystem(
@@ -2185,56 +2309,130 @@ def run_gpu(
         threading_layer=threading,
     ) as direct:
         analysis_s = direct.analyze()
-        be_fac = direct.factorize()
-        be_solve = direct.solve()
-        wp.launch(monitor_state_kernel, dim=physical_n,
-                  inputs=[solution, state_flag], device=dev)
-        be_res = gpu_relative_residual(
-            row_ptr, col_ind, values, solution, rhs, residual, topo.n, dev
-        )
-        wp.launch(copy_prefix_kernel, dim=physical_n,
-                  inputs=[solution], outputs=[y_n], device=dev)
-        record_intermediate(1, y_n)
+        factorization_s = direct.factorize()
+        matrix_dt = trbdf2_d*cfg.dtau
+        current_t = 0.0
+        trial_dt = min(cfg.dtau, cfg.tau_end)
+        if cfg.adaptive and cfg.dtau_max is not None:
+            trial_dt = min(trial_dt, cfg.dtau_max)
+        accepted_steps = 0
+        rejected_steps = 0
+        assembly_total = assembly_s
+        refactorization_total = 0.0
+        stage_times: list[float] = []
+        first_stage_residual = 0.0
+        last_residual = 0.0
 
-        if nsteps == 1:
-            final = np.asarray(y_n.numpy(), dtype=np.float64)
-            return finish(
-                final, be_residual=be_res, last_residual=be_res,
-                assembly_s=assembly_s, analysis_s=analysis_s,
-                be_factor_s=be_fac, be_solve_s=be_solve,
-                bdf_factor_s=0.0, mean_bdf_solve_s=0.0,
+        while current_t < cfg.tau_end - 1.0e-14*max(1.0, cfg.tau_end):
+            if cfg.adaptive:
+                trial_dt = min(trial_dt, cfg.tau_end-current_t)
+                if trial_dt < cfg.dtau_min:
+                    raise RuntimeError("adaptive timestep fell below runtime.dtau_min")
+                desired_matrix_dt = trbdf2_d*trial_dt
+                if not math.isclose(desired_matrix_dt, matrix_dt, rel_tol=1.0e-14, abs_tol=0.0):
+                    t_assemble = time.perf_counter()
+                    wp.launch(
+                        assemble_trbdf2_matrix_kernel, dim=physical_n,
+                        inputs=[p_faces, p_centers, xi_faces, xi_centers,
+                                radial_volume, cell_volume, cf_faces, ca_faces, nud_centers,
+                                topo.diag_slot, topo.pm_slot, topo.pp_slot, topo.xm_slot, topo.xp_slot,
+                                grid.Np, grid.Nxi, wp.float64(grid.dp), wp.float64(grid.dxi),
+                                wp.float64(phys.Ebar), wp.float64(phys.alpha),
+                                wp.float64(desired_matrix_dt), wp.float64(1.0),
+                                1 if cfg.inner_boundary == "absorbing" else 0],
+                        outputs=[values], device=dev,
+                    )
+                    if ch_active:
+                        wp.launch(add_ch_augmented_kernel, dim=ch.active_count,
+                                  inputs=[ch_coeff, topo.ch_aux_slot, wp.float64(desired_matrix_dt)],
+                                  outputs=[values], device=dev)
+                    wp.synchronize_stream(wp.get_stream(dev_obj))
+                    assembly_total += time.perf_counter()-t_assemble
+                    refactorization_total += direct.refactorize()
+                    matrix_dt = desired_matrix_dt
+
+            wp.launch(csr_matvec_kernel, dim=topo.n,
+                      inputs=[row_ptr, col_ind, values, state_n], outputs=[applied_n], device=dev)
+            wp.launch(build_trbdf2_stage1_rhs_kernel, dim=topo.n,
+                      inputs=[state_n, applied_n, physical_n], outputs=[rhs], device=dev)
+            stage_times.append(direct.solve())
+            if accepted_steps == 0:
+                first_stage_residual = gpu_relative_residual(
+                    row_ptr, col_ind, values, solution, rhs, residual, topo.n, dev
+                )
+            wp.launch(copy_all_kernel, dim=topo.n,
+                      inputs=[solution], outputs=[state_gamma], device=dev)
+
+            wp.launch(csr_matvec_kernel, dim=topo.n,
+                      inputs=[row_ptr, col_ind, values, state_gamma], outputs=[applied_gamma], device=dev)
+            wp.launch(build_trbdf2_stage2_rhs_kernel, dim=topo.n,
+                      inputs=[state_n, applied_n, state_gamma, applied_gamma,
+                              physical_n, wp.float64(1.0/trbdf2_d)],
+                      outputs=[rhs], device=dev)
+            stage_times.append(direct.solve())
+            last_residual = gpu_relative_residual(
+                row_ptr, col_ind, values, solution, rhs, residual, topo.n, dev
             )
-
-        # Only the physical time-derivative block changes from BE to BDF2.
-        # Auxiliary constraints are time independent and remain unchanged.
-        wp.launch(add_diagonal_kernel, dim=physical_n,
-                  inputs=[topo.diag_slot, wp.float64(0.5)], outputs=[values], device=dev)
-        # The BDF2 diagonal changes values but not CSR topology. Reuse cuDSS
-        # analysis/permutation; FACTORIZATION would redo work unnecessarily.
-        bdf_fac = direct.refactorize()
-        solve_times: list[float] = []
-        for step in range(1, nsteps):
-            wp.launch(build_bdf2_rhs_kernel, dim=physical_n,
-                      inputs=[y_n, y_nm1], outputs=[rhs], device=dev)
-            solve_times.append(direct.solve())
+            wp.launch(copy_all_kernel, dim=topo.n,
+                      inputs=[solution], outputs=[state_one], device=dev)
             wp.launch(monitor_state_kernel, dim=physical_n,
-                      inputs=[solution, state_flag], device=dev)
-            wp.copy(y_nm1, y_n)
-            wp.launch(copy_prefix_kernel, dim=physical_n,
-                      inputs=[solution], outputs=[y_n], device=dev)
-            record_intermediate(step+1, y_n)
+                      inputs=[state_one, state_flag], device=dev)
 
-        last_res = gpu_relative_residual(
-            row_ptr, col_ind, values, solution, rhs, residual, topo.n, dev
-        )
-        final = np.asarray(y_n.numpy(), dtype=np.float64)
+            error_norm = 0.0
+            if cfg.adaptive:
+                wp.launch(csr_matvec_kernel, dim=topo.n,
+                          inputs=[row_ptr, col_ind, values, state_one], outputs=[applied_one], device=dev)
+                wp.launch(build_trbdf2_error_rhs_kernel, dim=topo.n,
+                          inputs=[state_n, applied_n, state_gamma, applied_gamma,
+                                  state_one, applied_one, physical_n,
+                                  wp.float64(1.0/trbdf2_d)], outputs=[rhs], device=dev)
+                direct.solve()  # Hosea--Shampine stiff filter with the same factorization.
+                err = np.asarray(solution.numpy(), dtype=np.float64)[:physical_n]
+                endpoint = np.asarray(state_one.numpy(), dtype=np.float64)[:physical_n]
+                previous = np.asarray(state_n.numpy(), dtype=np.float64)[:physical_n]
+                scale = cfg.atol + cfg.rtol*np.maximum(np.abs(endpoint), np.abs(previous))
+                error_norm = float(np.sqrt(np.mean((err/scale)**2)))
+                if not math.isfinite(error_norm):
+                    raise FloatingPointError("non-finite adaptive TR-BDF2 error estimate")
+
+            if not cfg.adaptive or error_norm <= 1.0:
+                accepted_steps += 1
+                current_t += trial_dt
+                wp.launch(copy_all_kernel, dim=topo.n,
+                          inputs=[state_one], outputs=[state_n], device=dev)
+                record_intermediate(accepted_steps, current_t, state_n)
+                if cfg.adaptive:
+                    factor = cfg.max_factor if error_norm == 0.0 else cfg.safety*error_norm**(-1.0/3.0)
+                    factor = min(cfg.max_factor, max(cfg.min_factor, factor))
+                    trial_dt *= factor
+                    if cfg.dtau_max is not None:
+                        trial_dt = min(trial_dt, cfg.dtau_max)
+                else:
+                    if accepted_steps >= fixed_nsteps:
+                        break
+            else:
+                rejected_steps += 1
+                factor = cfg.safety*error_norm**(-1.0/3.0)
+                factor = min(1.0, max(cfg.min_factor, factor))
+                trial_dt *= factor
+                if trial_dt < cfg.dtau_min:
+                    raise RuntimeError("adaptive timestep rejection reached runtime.dtau_min")
+                if rejected_steps > cfg.max_steps:
+                    raise RuntimeError("adaptive timestep exceeded runtime.max_steps")
+
+            if accepted_steps + rejected_steps > cfg.max_steps:
+                raise RuntimeError("adaptive timestep exceeded runtime.max_steps")
+
+        final = np.asarray(state_n.numpy(), dtype=np.float64)
 
     return finish(
-        final, be_residual=be_res, last_residual=last_res,
-        assembly_s=assembly_s, analysis_s=analysis_s,
-        be_factor_s=be_fac, be_solve_s=be_solve,
-        bdf_factor_s=bdf_fac,
-        mean_bdf_solve_s=float(np.mean(solve_times)) if solve_times else 0.0,
+        final, accepted_steps, first_stage_residual=first_stage_residual,
+        last_residual=last_residual, assembly_s=assembly_total,
+        analysis_s=analysis_s, factorization_s=factorization_s,
+        refactorization_s=refactorization_total,
+        first_stage_solve_s=stage_times[0] if stage_times else 0.0,
+        mean_stage_solve_s=float(np.mean(stage_times)) if stage_times else 0.0,
+        rejected_steps=rejected_steps,
     )
 
 
@@ -2316,6 +2514,15 @@ def load_config(config_path: Path | None = None) -> tuple[SolverConfig, str, Pat
         seed_xi0=float(seed["xi0"]),
         seed_sigma_xi=float(seed["sigma_xi"]),
         device=str(runtime["device"]),
+        adaptive=bool(runtime.get("adaptive", False)),
+        rtol=float(runtime.get("rtol", 1.0e-4)),
+        atol=float(runtime.get("atol", 1.0e-12)),
+        safety=float(runtime.get("safety", 0.9)),
+        min_factor=float(runtime.get("min_factor", 0.2)),
+        max_factor=float(runtime.get("max_factor", 5.0)),
+        dtau_min=float(runtime.get("dtau_min", 1.0e-8)),
+        dtau_max=(float(runtime["dtau_max"]) if "dtau_max" in runtime else None),
+        max_steps=int(runtime.get("max_steps", 100000)),
         save_every=int(output["save_every"]),
         diag_every=int(output["diag_every"]),
         output=output_path,
@@ -2356,9 +2563,21 @@ def validate_config(cfg: SolverConfig) -> None:
         raise ValueError("q_coll and q_init must be positive")
     if cfg.dtau <= 0.0 or cfg.tau_end < 0.0:
         raise ValueError("dtau must be positive and tau_end must be nonnegative")
-    nsteps = round(cfg.tau_end / cfg.dtau)
-    if not math.isclose(nsteps * cfg.dtau, cfg.tau_end, rel_tol=1e-12, abs_tol=1e-14):
-        raise ValueError("tau_end must be an integer multiple of dtau")
+    if cfg.adaptive:
+        if cfg.rtol <= 0.0 or cfg.atol <= 0.0:
+            raise ValueError("adaptive rtol and atol must be positive")
+        if not (0.0 < cfg.min_factor <= 1.0 <= cfg.max_factor):
+            raise ValueError("adaptive step factors must satisfy 0 < min_factor <= 1 <= max_factor")
+        if not (0.0 < cfg.safety < 1.0):
+            raise ValueError("adaptive safety must lie in (0, 1)")
+        if cfg.dtau_min <= 0.0 or (cfg.dtau_max is not None and cfg.dtau_max < cfg.dtau_min):
+            raise ValueError("adaptive timestep bounds are invalid")
+        if cfg.max_steps < 1:
+            raise ValueError("adaptive max_steps must be positive")
+    else:
+        nsteps = round(cfg.tau_end / cfg.dtau)
+        if not math.isclose(nsteps * cfg.dtau, cfg.tau_end, rel_tol=1e-12, abs_tol=1e-14):
+            raise ValueError("tau_end must be an integer multiple of dtau when adaptive=false")
     if cfg.init not in {"maxwell-juttner", "gaussian"}:
         raise ValueError(f"unsupported initial condition {cfg.init!r}")
     if cfg.gaussian_sigma_p <= 0.0 or cfg.gaussian_sigma_xi <= 0.0:
@@ -2434,7 +2653,7 @@ def report_result(result: dict, cfg: SolverConfig, phys: DerivedPhysics, grid: G
     print(f"final n/nref={d['density_ratio']:.12e}")
     print(f"final j_parallel={d['current_A_m2']:.12e} A/m^2")
     print(f"final min(N)={d['min_N']:.6e}  max(f)={d['max_f']:.6e}")
-    print(f"BE residual={result['be_residual']:.3e}  final residual={result['last_residual']:.3e}")
+    print(f"TR-BDF2 stage-1 residual={result['first_stage_residual']:.3e}  final residual={result['last_residual']:.3e}")
 
     change = result["state_change"]
     eq_case = (
@@ -2471,9 +2690,10 @@ def report_result(result: dict, cfg: SolverConfig, phys: DerivedPhysics, grid: G
             f"(rowptr_host={tt['rowptr_host_s']:.3e}, "
             f"fill_gpu={tt['fill_gpu_s']:.3e}, validate_gpu={tt['validate_gpu_s']:.3e})"
         )
-    for k in ("assembly_s","analysis_s","be_factor_s","be_solve_s","bdf_factor_s","mean_bdf_solve_s"):
+    for k in ("assembly_s","analysis_s","factorization_s","refactorization_s","mean_stage_solve_s"):
         if k in result:
             print(f"{k}={result[k]:.6e} s")
+    print(f"accepted_steps={result.get('accepted_steps', 0)} rejected_steps={result.get('rejected_steps', 0)}")
 
 
 
@@ -2542,6 +2762,10 @@ def save_result(
         backend=np.asarray(result["backend"]),
         large_angle_formulation=np.asarray(result.get("large_angle_formulation", "local")),
         state_monitor_flag=np.asarray(result.get("state_monitor_flag", 0), dtype=np.int32),
+        accepted_steps=np.asarray(result.get("accepted_steps", 0), dtype=np.int64),
+        rejected_steps=np.asarray(result.get("rejected_steps", 0), dtype=np.int64),
+        adaptive=np.asarray(cfg.adaptive),
+        first_stage_residual=np.asarray(result.get("first_stage_residual", 0.0)),
         be_residual=np.asarray(result["be_residual"]),
         last_residual=np.asarray(result["last_residual"]),
     )

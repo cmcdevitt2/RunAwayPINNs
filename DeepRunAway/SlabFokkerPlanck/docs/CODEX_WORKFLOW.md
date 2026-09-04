@@ -38,6 +38,8 @@ cuDSS direct solve, transient scheme, boundary semantics, and output schema.
 The solver currently consumes prescribed plasma parameters. A coupling change
 must specify: exchanged state, update cadence, coefficient rebuild policy,
 topology reuse/refactorization policy, conservation exchange, and restart data.
+OpenADAS acquisition is handled separately through `scripts/fetch_openadas.py`;
+downloaded ADF11 files and manifests stay outside Git.
 
 Do not port adjoint-only RPF identities or PINN training checks as if they were
 forward-solver qualification. Reuse the SlabRpfPinn stress evidence for cuDSS

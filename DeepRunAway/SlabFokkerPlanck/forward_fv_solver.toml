@@ -66,6 +66,17 @@ sigma_xi = 0.05
 [runtime]
 device = "cuda:0"
 balance_check = true
+# TR--BDF2 is fixed-step by default. Set adaptive=true for the embedded
+# Hosea--Shampine error controller and step-size changes.
+adaptive = false
+rtol = 1.0e-4
+atol = 1.0e-12
+safety = 0.9
+min_factor = 0.2
+max_factor = 5.0
+dtau_min = 1.0e-8
+# dtau_max = 1.0e-2
+max_steps = 100000
 
 [output]
 write = true
