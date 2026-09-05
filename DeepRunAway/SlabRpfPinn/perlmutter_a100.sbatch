@@ -3,7 +3,7 @@
 #
 # Default: one-node, one-GPU debug smoke/preflight job (30-minute QOS limit).
 # For production-length work, override --qos and --time at submission; do not
-# use this default debug request for a production campaign.
+# use this default debug request for production work.
 #
 # Select the A100 memory class at submission if needed:
 #   sbatch --constraint='gpu&hbm40g' perlmutter_a100.sbatch fv
@@ -13,7 +13,6 @@
 # Modes:
 #   fv [config]       adjoint_fv_solver.py
 #   pinn [config]     pinn_training.py
-#   campaign [config] fv_robustness_campaign.py
 
 #SBATCH --job-name=slab-rpf-a100
 #SBATCH --account=m5276
@@ -54,17 +53,17 @@ export NUMEXPR_NUM_THREADS=28
 export SLURM_CPU_BIND=cores
 
 gpu_name="$(nvidia-smi --query-gpu=name --format=csv,noheader | sed -n '1p')"
-gpu_memory="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader | sed -n '1p')"
+gpu_memory_mib="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | sed -n '1p' | tr -d '[:space:]')"
 if [[ "$gpu_name" != *"A100"* ]]; then
     echo "Perlmutter A100 allocation required, got: $gpu_name" >&2
     exit 1
 fi
-if [[ "$gpu_memory" != *"40"* && "$gpu_memory" != *"80"* ]]; then
-    echo "expected a 40/80 GB A100, got: $gpu_name ($gpu_memory)" >&2
+if [[ "$gpu_memory_mib" != "40960" && "$gpu_memory_mib" != "81920" ]]; then
+    echo "expected a 40/80 GB A100, got: $gpu_name (${gpu_memory_mib} MiB)" >&2
     exit 1
 fi
 
-echo "GPU: $gpu_name ($gpu_memory)"
+echo "GPU: $gpu_name (${gpu_memory_mib} MiB)"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
 echo "SLURM_JOB_GPUS=${SLURM_JOB_GPUS:-<unset>}"
 echo "environment=$env_dir"
@@ -108,12 +107,8 @@ case "$mode" in
         config="${config:-pinn_training.toml}"
         command=(pinn_training.py --config "$config")
         ;;
-    campaign)
-        config="${config:-fv_robustness_campaign.toml}"
-        command=(fv_robustness_campaign.py --config "$config")
-        ;;
     *)
-        echo "usage: sbatch [Slurm overrides] perlmutter_a100.sbatch [fv|pinn|campaign] [config]" >&2
+        echo "usage: sbatch [Slurm overrides] perlmutter_a100.sbatch [fv|pinn] [config]" >&2
         exit 2
         ;;
 esac

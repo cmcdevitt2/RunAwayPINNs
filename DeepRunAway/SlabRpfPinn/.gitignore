@@ -6,6 +6,7 @@ data/
 outputs/
 logs/
 models/
+backup/
 *.npz
 *.png
 

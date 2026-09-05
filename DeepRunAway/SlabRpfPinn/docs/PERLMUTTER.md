@@ -132,8 +132,7 @@ must not be used as scientific evidence. Use `exit` to release the allocation.
 ## Batch and job-log workflow
 
 Create Slurm output directories before submission because Slurm opens the
-output paths before the script starts. A single serial campaign job should
-cycle cases and panels itself, as the repository's campaign contract requires:
+output paths before the script starts:
 
 ```bash
 mkdir -p logs outputs
@@ -149,7 +148,7 @@ Use `squeue` for pending/running jobs and `sacct` for the final state, exit
 code, elapsed time, allocation, and memory. Keep the stdout/stderr files with
 the result directory. The checked-in
 [`perlmutter_a100.sbatch`](../perlmutter_a100.sbatch) template performs the
-GPU/backend preflight and can dispatch FV, PINN, or campaign mode:
+GPU/backend preflight and can dispatch FV or PINN mode:
 
 ```bash
 mkdir -p logs outputs
@@ -160,9 +159,9 @@ sbatch perlmutter_a100.sbatch fv adjoint_fv_solver.toml
 # PINN smoke/preflight:
 sbatch perlmutter_a100.sbatch pinn pinn_training_smoke.toml
 
-# Production-length run: override QOS/time, and optionally select 80 GiB A100s.
+# Production FV run: override QOS/time, and optionally select 80 GiB A100s.
 sbatch --qos=regular --time=06:00:00 \
-  --constraint='gpu&hbm80g' perlmutter_a100.sbatch campaign fv_robustness_campaign.toml
+  --constraint='gpu&hbm80g' perlmutter_a100.sbatch fv adjoint_fv_solver.toml
 ```
 
 The template's `--mem=200G` and walltime are starting values, not a

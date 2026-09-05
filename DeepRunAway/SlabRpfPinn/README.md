@@ -6,15 +6,11 @@ steady 0D--2P relativistic runaway-electron first-passage problem.
 ## Contents
 
 - `adjoint_fv_solver.py`: Warp/cuDSS finite-volume adjoint/RPF solver.
-- `fv_robustness_campaign.py`: B200 parameter-sweep and grid/domain-refinement FV qualification driver.
-- `perlmutter_a100.sbatch`: Perlmutter A100 FV/PINN/campaign batch template.
-- `fv_theta_resolution.toml`, `fv_theta_resolution_b200.sbatch`: focused angular-grid resolution study.
+- `perlmutter_a100.sbatch`: Perlmutter A100 FV/PINN batch template.
 - `pinn_training.py`: JAX PINN trainer using FV-generated labels.
 - `pinn_training_smoke.toml`: persistent one-case GPU execution smoke test;
   not a training qualification.
 - `adjoint_fv_solver.toml`: small direct-solver example case.
-- `fv_robustness_campaign.toml`: first-pass domain-wide FV robustness campaign.
-- `fv_robustness_refinement.toml`: higher-resolution follow-up campaign.
 - `pinn_training.toml`: training configuration and parameter domain.
 - `rpf_fv_pinn_scientific_reference_v1.tex`: scientific and numerical reference.
 - `docs/HIPERGATOR.md`: Hipergator B200 GPU batch-job workflow.
@@ -61,25 +57,16 @@ Training with `generate = true` writes the FV dataset and model outputs under
 the configured paths. Those generated files are ignored by Git and should be
 reproducible from the committed source and TOML configuration.
 
-## FV qualification before PINN labels
+## FV label generation
 
-Run `fv_robustness_campaign.py` before generating parametric PINN labels. It
-uses the configured six-dimensional parameter domain, executes every case on
-each grid/domain panel, records per-case FV checks, and compares each panel
-with the reference panel on a common phase-space probe grid. It is an evidence
-campaign: the resulting scalar report does not by itself promote labels.
-
-On a B200 allocation, first validate the plan without a GPU, then submit the
-committed batch script:
+`pinn_training.py` generates FV labels outside JAX using the configured GPU FV
+solver, then trains the PINN from those labels. Run it only on an allocated GPU
+node:
 
 ```bash
-source ../.venv/bin/activate
-python fv_robustness_campaign.py --config fv_robustness_campaign.toml --dry-run
-mkdir -p logs outputs/fv_robustness
-sbatch fv_robustness_b200.sbatch
+python pinn_training.py --config pinn_training.toml
 ```
 
-The job writes `outputs/fv_robustness/fv_robustness_summary.json`; retain it
-with the Slurm logs and configuration. Increase Sobol coverage and enable
-corner cases or higher-resolution panels only after reviewing the initial
-campaign's memory, residual, and refinement evidence.
+Use `pinn_training_smoke.toml` for a short execution-path check. Keep generated
+datasets, models, logs, and plots in ignored output paths or approved scratch
+storage.

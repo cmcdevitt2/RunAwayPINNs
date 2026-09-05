@@ -32,15 +32,13 @@ the HiPerGator driver and module stack. Follow the CUDA profile in
 
 ## B200 resource request
 
-Existing HiPerGator B200 scripts use `hpg-b200`, `b200`, and
-`gpu:b200:1`. Confirm current names with `sinfo` before submission. Replace
-both placeholders below with values supplied by HiPerGator project settings;
-do not guess account or QOS:
+HiPerGator B200 jobs require site-specific account and QOS values. Confirm
+current names with `sinfo`; do not guess account or QOS:
 
 ```bash
 sinfo
 sbatch --account=<HIPERGATOR_ACCOUNT> --qos=<HIPERGATOR_QOS> \
-  fv_robustness_b200.sbatch
+  hipergator_b200.sbatch
 ```
 
 For ordinary one-GPU studies, retain 28 total host threads:
@@ -52,8 +50,8 @@ export OPENBLAS_NUM_THREADS=28
 export NUMEXPR_NUM_THREADS=28
 ```
 
-Use one serial batch job to cycle cases and meshes. Do not submit one job per
-case unless a separate campaign design authorizes it.
+Run one serial batch job for each production workflow. Do not submit one job
+per parameter case.
 
 ## Direct FV or PINN batch template
 
@@ -128,8 +126,7 @@ CONFIG="${CONFIG:-adjoint_fv_solver.toml}"
 case "$MODE" in
     fv)       PROGRAM=(adjoint_fv_solver.py) ;;
     pinn)     PROGRAM=(pinn_training.py) ;;
-    campaign) PROGRAM=(fv_robustness_campaign.py) ;;
-    *)        echo "MODE must be fv, pinn, or campaign" >&2; exit 2 ;;
+    *)        echo "MODE must be fv or pinn" >&2; exit 2 ;;
 esac
 srun --ntasks=1 --cpus-per-task=28 --gpus-per-task=1 \
     --cpu-bind=cores python "${PROGRAM[@]}" --config "$CONFIG"
@@ -142,16 +139,6 @@ before executing the script:
 mkdir -p logs outputs
 MODE=fv CONFIG=adjoint_fv_solver.toml sbatch hpg_b200.sbatch
 MODE=pinn CONFIG=pinn_training_smoke.toml sbatch hpg_b200.sbatch
-```
-
-For committed campaign scripts, submit exact script name and pass account/QOS
-overrides explicitly:
-
-```bash
-mkdir -p logs outputs/fv_robustness
-python fv_robustness_campaign.py --config fv_robustness_campaign.toml --dry-run
-sbatch --account=<HIPERGATOR_ACCOUNT> --qos=<HIPERGATOR_QOS> \
-  fv_robustness_b200.sbatch
 ```
 
 ## Interactive smoke test

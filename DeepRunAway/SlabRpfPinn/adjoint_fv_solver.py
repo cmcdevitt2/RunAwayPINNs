@@ -82,6 +82,7 @@ import tomllib
 
 import numpy as np
 import scipy.constants as const
+import scipy.optimize as sopt
 import scipy.sparse as sp
 import scipy.special as sps
 
@@ -188,6 +189,9 @@ class SolverConfig:
     pmax: float = 5.0
     p_mapping: str = "uniform"
     p_mapping_kappa: float = 4.0
+    p_mapping_width: float = 0.65
+    p_mapping_strength: float = 8.0
+    p_mapping_positive_floor: float = 1.0
     xi_mapping: str = "uniform"
 
     # Configurable terminal response centered at p_RE.  "heaviside" uses the
@@ -361,12 +365,19 @@ def validate_rpf_config(cfg: SolverConfig) -> None:
     if cfg.pmax <= cfg.pmin:
         raise ValueError("grid.pmax must be greater than grid.pmin")
     p_mapping = str(cfg.p_mapping).strip().lower()
-    if p_mapping not in ("uniform", "log", "exponential"):
-        raise ValueError("grid.p_mapping must be 'uniform', 'log', or 'exponential'")
-    if p_mapping == "log" and cfg.pmin <= 0.0:
-        raise ValueError("grid.p_mapping='log' requires grid.pmin > 0")
+    if p_mapping not in ("uniform", "log", "exponential", "flow_monitor"):
+        raise ValueError("grid.p_mapping must be 'uniform', 'log', 'exponential', or 'flow_monitor'")
+    if p_mapping in ("log", "flow_monitor") and cfg.pmin <= 0.0:
+        raise ValueError(f"grid.p_mapping='{p_mapping}' requires grid.pmin > 0")
     if not math.isfinite(cfg.p_mapping_kappa) or cfg.p_mapping_kappa <= 0.0:
         raise ValueError("grid.p_mapping_kappa must be finite and positive")
+    if p_mapping == "flow_monitor":
+        if not math.isfinite(cfg.p_mapping_width) or cfg.p_mapping_width <= 0.0:
+            raise ValueError("grid.p_mapping_width must be finite and positive")
+        if not math.isfinite(cfg.p_mapping_strength) or cfg.p_mapping_strength < 0.0:
+            raise ValueError("grid.p_mapping_strength must be finite and non-negative")
+        if not math.isfinite(cfg.p_mapping_positive_floor) or cfg.p_mapping_positive_floor < 0.0:
+            raise ValueError("grid.p_mapping_positive_floor must be finite and non-negative")
     if str(cfg.xi_mapping).strip().lower() not in ("uniform", "theta"):
         raise ValueError("grid.xi_mapping must be 'uniform' or 'theta'")
 
@@ -489,7 +500,41 @@ def derive_physics(cfg: SolverConfig) -> DerivedPhysics:
     )
 
 
-def build_grid(cfg: SolverConfig) -> Grid:
+def flow_monitor_roots(cfg: SolverConfig, phys: DerivedPhysics) -> tuple[float, ...]:
+    """Find all xi=-1 momentum roots of the actual radial drift U_p."""
+    p_probe = np.geomspace(cfg.pmin, cfg.pmax, 4097, dtype=np.float64)
+    cf = fully_relativistic_asymptotically_matched_collision_coefficients(
+        p_probe, cfg, phys
+    )[0]
+    # At xi=-1, synchrotron drag vanishes and U_p = Ebar - C_F(p).
+    up = float(phys.Ebar) - cf
+    roots: list[float] = []
+    for left, right, f_left, f_right in zip(
+        p_probe[:-1], p_probe[1:], up[:-1], up[1:]
+    ):
+        if f_left == 0.0:
+            roots.append(float(left))
+        elif f_left * f_right < 0.0:
+            root = sopt.brentq(
+                lambda p: float(
+                    phys.Ebar
+                    - fully_relativistic_asymptotically_matched_collision_coefficients(
+                        np.asarray([p], dtype=np.float64), cfg, phys
+                    )[0][0]
+                ),
+                float(left), float(right), xtol=1.0e-13, rtol=4.0*np.finfo(float).eps,
+            )
+            roots.append(float(root))
+    if up[-1] == 0.0:
+        roots.append(float(p_probe[-1]))
+    return tuple(roots)
+
+
+def build_grid(
+    cfg: SolverConfig,
+    phys: DerivedPhysics | None = None,
+    flow_focuses: tuple[float, ...] | None = None,
+) -> Grid:
     mapping = str(cfg.p_mapping).strip().lower()
     if mapping == "uniform":
         pf = np.linspace(cfg.pmin, cfg.pmax, cfg.Np + 1, dtype=np.float64)
@@ -500,6 +545,42 @@ def build_grid(cfg: SolverConfig) -> Grid:
         kappa = float(cfg.p_mapping_kappa)
         s = np.linspace(0.0, 1.0, cfg.Np + 1, dtype=np.float64)
         pf = cfg.pmin + (cfg.pmax-cfg.pmin)*np.expm1(kappa*s)/np.expm1(kappa)
+    elif mapping == "flow_monitor":
+        if phys is None and flow_focuses is None:
+            raise ValueError("flow_monitor grid requires derived physics or computed flow_focuses")
+        focuses = tuple(flow_focuses) if flow_focuses is not None else flow_monitor_roots(cfg, phys)
+        # Equidistribute a one-sided log-momentum monitor around U_p=0 roots
+        # at xi=-1. Extra density applies only on the positive-U_p side.
+        # Campaigns pass an envelope of roots computed from every case so the
+        # common grid remains valid across the parameter sample.
+        x = np.linspace(np.log(cfg.pmin), np.log(cfg.pmax), 32769, dtype=np.float64)
+        monitor = np.ones_like(x)
+        width = float(cfg.p_mapping_width)
+        strength = float(cfg.p_mapping_strength)
+        positive_floor = float(cfg.p_mapping_positive_floor)
+        cf = fully_relativistic_asymptotically_matched_collision_coefficients(
+            np.exp(x), cfg, phys
+        )[0]
+        up = float(phys.Ebar) - cf
+        slopes = []
+        for focus in focuses:
+            root_x = np.log(float(focus))
+            index = int(np.argmin(np.abs(x - root_x)))
+            if 0 < index < x.size - 1:
+                slopes.append(abs((up[index + 1] - up[index - 1]) /
+                                  (x[index + 1] - x[index - 1])))
+        u_scale = max(1.0e-12, 0.05 * min(slopes, default=1.0))
+        positive_selector = 0.5 * (1.0 + np.tanh(up / u_scale))
+        monitor += positive_floor * positive_selector
+        for focus in focuses:
+            monitor += strength * positive_selector * np.exp(
+                -0.5 * (np.maximum(x - np.log(float(focus)), 0.0) / width) ** 2
+            )
+        cumulative = np.empty_like(x)
+        cumulative[0] = 0.0
+        cumulative[1:] = np.cumsum(0.5 * (monitor[:-1] + monitor[1:]) * np.diff(x))
+        targets = np.linspace(0.0, cumulative[-1], cfg.Np + 1, dtype=np.float64)
+        pf = np.exp(np.interp(targets, cumulative, x))
     else:
         raise ValueError(f"unsupported p_mapping {cfg.p_mapping!r}")
     p_widths = np.diff(pf)
@@ -2271,6 +2352,9 @@ def load_config(config_path: Path | None = None) -> tuple[SolverConfig, str, Pat
         pmin=float(grid["pmin"]), pmax=float(grid["pmax"]),
         p_mapping=str(grid.get("p_mapping", "uniform")).strip().lower(),
         p_mapping_kappa=float(grid.get("p_mapping_kappa", 4.0)),
+        p_mapping_width=float(grid.get("p_mapping_width", 0.65)),
+        p_mapping_strength=float(grid.get("p_mapping_strength", 8.0)),
+        p_mapping_positive_floor=float(grid.get("p_mapping_positive_floor", 1.0)),
         xi_mapping=str(grid.get("xi_mapping", "uniform")).strip().lower(),
         terminal_p=float(time_cfg.get("terminal_p", 1.25)),
         terminal_condition=str(time_cfg.get("terminal_condition", "heaviside")).strip().lower(),
@@ -2613,7 +2697,7 @@ def main() -> None:
     t0 = time.perf_counter()
     validate_rpf_config(cfg)
     phys = derive_physics(cfg)
-    grid = build_grid(cfg)
+    grid = build_grid(cfg, phys)
 
     print("evaluating small-angle collision coefficients ...", flush=True)
     t = time.perf_counter()

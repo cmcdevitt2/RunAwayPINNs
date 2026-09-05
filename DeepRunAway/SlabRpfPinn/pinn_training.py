@@ -504,7 +504,7 @@ def generate_fv_dataset(fv, dataset_path: Path):
         save_every=0,
     )
     fv.validate_rpf_config(base_cfg)
-    grid = fv.build_grid(base_cfg)
+    grid = fv.build_grid(base_cfg, fv.derive_physics(base_cfg))
 
     print("initializing FV Warp/cuDSS runtime ...", flush=True)
     gpu_context = fv.load_gpu_runtime(base_cfg.device)
