@@ -1,0 +1,117 @@
+{
+  "mode": "physics",
+  "parameter_domain": {
+    "E/Ec": [1.0, 1000.0, "log"],
+    "Te_eV": [0.1, 100.0, "log"],
+    "nD_m3": [1.0e20, 1.0e22, "log"],
+    "nNe_m3": [1.0e16, 1.0e22, "log"],
+    "zD": [0.01, 1.0, "linear"],
+    "zNe": [0.01, 10.0, "linear"]
+  },
+  "domain": {
+    "p_min": 0.002,
+    "p_max": 15.0,
+    "B_T": 5.0,
+    "momentum_sampling": "log",
+    "ebar_min": 1.0,
+    "ebar_max": 1000.0,
+    "te_min_eV": 0.1,
+    "te_max_eV": 100.0,
+    "nD_min_m3": 1.0e20,
+    "nD_max_m3": 1.0e22,
+    "nNe_min_m3": 1.0e16,
+    "nNe_max_m3": 1.0e22,
+    "zD_min": 0.01,
+    "zD_max": 1.0,
+    "zNe_min": 0.01,
+    "zNe_max": 10.0
+  },
+  "model": {
+    "model_type": "mlp",
+    "width": 64,
+    "depth": 4,
+    "latent_width": 64,
+    "branch_width": 64,
+    "branch_depth": 6,
+    "trunk_width": 64,
+    "trunk_depth": 6
+  },
+  "loss": {
+    "enable_data": true,
+    "enable_pde": true,
+    "enable_threshold_pde": true,
+    "enable_low_p_bc": true,
+    "enable_pmax_bc": true,
+    "data_weight": 1.0,
+    "pde_weight": 1.0,
+    "threshold_weight": 1.0,
+    "low_p_weight": 1.0,
+    "bc_weight": 1.0
+  },
+  "optimizer": {
+    "steps": 1000,
+    "learning_rate": 0.001,
+    "learning_rate_schedule": "cosine",
+    "learning_rate_final_fraction": 0.1,
+    "batch_size": 65536,
+    "case_batch_size": 0,
+    "test_batch_size": 262144,
+    "log_every": 100,
+    "checkpoint_every": 500,
+    "n_devices": 0,
+    "learning_rate_decay_steps": 0,
+    "soap_b1": 0.95,
+    "soap_b2": 0.95,
+    "soap_shampoo_beta": -1.0,
+    "soap_eps": 1.0e-8,
+    "soap_weight_decay": 0.0,
+    "soap_correct_bias": true,
+    "soap_precondition_frequency": 10,
+    "soap_max_precond_dim": 10000,
+    "soap_precondition_1d": false,
+    "ssbroyden_rtol": 1.0e-12,
+    "ssbroyden_atol": 1.0e-12,
+    "ssbroyden_blocks": 1,
+    "ssbroyden_block_iters": 10
+  },
+  "sampling": {
+    "angular_sampling": "theta"
+  },
+  "data": {
+    "train_case_fraction": 0.8,
+    "train_points": 65536,
+    "test_points": 32768,
+    "seed": 2026,
+    "low_p_Np": 8
+  },
+  "collocation": {
+    "pde_points": 65536,
+    "threshold_points": 16384,
+    "threshold_band_width": 0.02,
+    "low_p_points": 16384,
+    "boundary_points": 16384
+  },
+  "ssbroyden": {
+    "enabled": false
+  },
+  "active": {
+    "enabled": true,
+    "cycles": 2,
+    "dense_points": 32768,
+    "threshold_points": 32768,
+    "threshold_band_width": 0.02,
+    "acquire_points": 16,
+    "fv_Np": 256,
+    "fv_Nxi": 64,
+    "fv_p_stride": 1,
+    "fv_xi_stride": 1,
+    "n_jobs": -1,
+    "seed": 12026
+  },
+  "initial_model": "runs/train_physics_lowp_1024_gpu58319184/pinn_params.npz",
+  "dataset_path": "data/fv_dataset_1024",
+  "dataset_manifest": "runs/fv_dataset_1024/run_manifest.json",
+  "output_dir": "runs/train_active_threshold_1024_gpu58319184",
+  "checkpoint_dir": "runs/train_active_threshold_1024_gpu58319184/checkpoints",
+  "run_dir": "runs/train_active_threshold_1024_gpu58319184"
+}

@@ -1,0 +1,14 @@
+{
+  "model_dir": "runs/train_active_threshold_1024_gpu58319184",
+  "model_manifest": "runs/train_active_threshold_1024_gpu58319184/run_manifest.json",
+  "output_dir": "runs/train_active_threshold_1024_gpu58319184/validation_9090",
+  "plot": "runs/train_active_threshold_1024_gpu58319184/validation_9090/validation",
+  "dataset_path": null,
+  "dataset_manifest": null,
+  "cases": 32,
+  "fv_Np": 512,
+  "fv_Nxi": 128,
+  "pde_chunk": 8192,
+  "n_jobs": -1,
+  "seed": 9090
+}

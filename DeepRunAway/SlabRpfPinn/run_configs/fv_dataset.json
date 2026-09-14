@@ -1,0 +1,26 @@
+{
+  "parameter_domain": {
+    "E/Ec": [1.0, 1000.0, "log"],
+    "Te_eV": [0.1, 100.0, "log"],
+    "nD_m3": [1.0e20, 1.0e22, "log"],
+    "nNe_m3": [1.0e16, 1.0e22, "log"],
+    "zD": [0.01, 1.0, "linear"],
+    "zNe": [0.01, 10.0, "linear"]
+  },
+  "dataset_config": {
+    "n_cases": 1024,
+    "p_max": 15.0,
+    "B_T": 5.0,
+    "fv_Np": 512,
+    "fv_Nxi": 128,
+    "fv_p_stride": 4,
+    "fv_xi_stride": 4,
+    "n_jobs": -1,
+    "seed": 2026,
+    "candidate_oversample": 1.25
+  },
+  "dataset_path": "data/fv_dataset_1024",
+  "dataset_format": "directory",
+  "work_dir": "runs/fv_dataset_1024/work",
+  "run_dir": "runs/fv_dataset_1024"
+}

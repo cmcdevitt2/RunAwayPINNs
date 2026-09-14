@@ -1,125 +1,72 @@
-# Codex workflow
+# Development workflow
 
-This document expands the compact repository instructions in `AGENTS.md`.
-It is a playbook for Codex sessions working on the SlabRpfPinn solver and PINN.
+This document describes how to modify and verify the current script-driven
+SlabRpfPinn project. The root `README.md` and cluster runbooks are the
+user-facing execution documentation.
 
 ## Session start
 
-Use this order:
-
 ```bash
 pwd
-git rev-parse --show-toplevel
 git status --short --branch
-rg --files -g '!data/**' -g '!outputs/**' -g '!models/**' -g '!*.npz'
+rg --files -g '!data/**' -g '!runs/**' -g '!*.npz'
 ```
 
-Read `README.md`, then the relevant script and TOML file. Search definitions and
-callers with `rg` before opening unrelated files. Confirm repository root before
-staging because this directory is nested inside a larger public repository.
+Read `README.md`, the relevant JSON config, and the relevant driver/core
+module. Search symbols and callers with `rg` before opening unrelated files.
 
-## Task routing
+## Code ownership
 
-Classify work before acting:
+- `core/rpf_fv_cpu.py` owns the CPU finite-volume discretization and adjoint
+  solve.
+- `core/fv_dataset.py` owns case generation, flattening/coarsening, storage,
+  and loading.
+- `core/fv_distributed.py` owns multi-node CPU dataset orchestration.
+- `core/model.py` owns MLP/DeepONet architecture and prediction.
+- `core/pde.py` owns normalized physical coefficients, residuals, boundaries,
+  and collocation sampling.
+- `core/training.py` owns data, physics, SOAP, SSBroyden, and active loops.
+- `core/training_config.py` owns the hierarchical training schema.
+- `core/training_artifacts.py` owns manifests, checksums, atomic writes, file
+  barriers, checkpoints, and histories.
+- The three root Python files are config-only user entry points.
 
-- Locate or trace one symbol: use `cavecrew-investigator` with a fast model and
-  request path/line output.
-- Rename or edit one or two obvious files: use a bounded builder or make the
-  surgical edit directly.
-- Unknown numerical failure: investigate first; rank hypotheses by evidence.
-- Cross-file solver change: keep design and integration in the main context;
-  delegate independent searches or checks only.
-- Completed diff: use a reviewer before commit.
-- Validation request: run focused checks, then stop.
+Keep FV label generation outside JAX automatic differentiation. Preserve the
+normalized eight-coordinate model interface, FP64, probability bounds, FV
+boundary semantics, and parameter-domain definitions unless the task
+explicitly changes the numerical model.
 
-Use parallel delegation only for independent tasks. Never delegate two agents to
-edit overlapping files. Prefer a fast/low-cost model for deterministic search,
-format, syntax, or metadata work. Use a stronger model for numerical semantics,
-architecture, or review of coupled changes. Do not hard-code a model name when
-the active Codex environment exposes different model choices.
+## Configuration contract
 
-## Context budget
+There are three active JSON files:
 
-- Pass exact paths, symbols, line ranges, and acceptance criteria to agents.
-- Ask agents for compressed findings, not broad explanations.
-- Do not paste whole source files into prompts when a path and search term work.
-- Cache stable facts in the task context; do not reread them without a reason.
-- Keep progress messages short and reserve detail for the final handoff.
-- If context grows, summarize decisions and unresolved issues before continuing.
+- `run_configs/fv_dataset.json` for FV data generation;
+- `run_configs/train.json` for model mode, architecture, losses, optimizer,
+  resource usage, and artifact paths;
+- `run_configs/validate_model.json` for model loading and analytics.
 
-## Code boundaries
+Do not add runtime CLI options to the root drivers. A new run uses new artifact
+directories; completed run directories are protected from overwrite.
 
-`adjoint_fv_solver.py` is the direct FV reference path. Preserve its cell-content
-state convention, algebraic transpose, GPU CSR topology, and cuDSS factorization
-reuse. `pinn_training.py` is a steady PINN path. Preserve its separation between
-JAX differentiation and FV label generation.
+## Verification ladder
 
-Do not silently change physics, boundary semantics, solver tolerances, schemas,
-parameter ranges, or training protocol during cleanup. Such changes require a
-separate task and a qualification plan.
+1. Parse all active JSON configurations.
+2. Compile root drivers and `core/` with the project Python.
+3. Import core drivers and verify the JAX backend/FP64 inside an allocation.
+4. For FV changes, run a small CPU case and check probability bounds, residual,
+   and dataset manifest completion.
+5. For training changes, run a short GPU training allocation, inspect checkpoint
+   and loss-history files, and validate held-out cases.
+6. For validation changes, verify model and optional dataset manifests plus
+   their checksums before analytics.
+7. For multi-node data training, verify one rank per node, global device count,
+   synchronized completion, and a single final artifact set.
 
-## HPC execution
+Do not run production CPU generation or GPU training on login nodes. Do not
+claim GPU or multi-node qualification from syntax/import checks alone.
 
-Use `docs/HIPERGATOR.md` only for Hipergator B200 jobs and
-`docs/PERLMUTTER.md` for NERSC Perlmutter A100 jobs. Their Slurm resource
-syntax is not interchangeable. Before submitting:
+## Reporting
 
-Use `docs/DEPENDENCIES.md` for shared Python/GPU installation. Keep solver
-code cluster-agnostic; keep site-specific resource and module choices in site
-documentation. Do not install VCS dependencies as persistent source
-repositories.
-
-```bash
-mkdir -p logs data outputs
-sbatch <cluster-specific-job-script>
-```
-
-Inside the job, use `cd "$SLURM_SUBMIT_DIR"`, activate `../.venv` (or the
-validated site-specific replacement), disable JAX preallocation, and print
-JAX, Warp, nvmath, and cuDSS device/version information. JAX may report its GPU
-backend as `gpu`; confirm CUDA execution through `jax.devices()` and Warp's
-device list. Never interpret a login-node CPU result as a solver qualification.
-Perlmutter currently documents A100 GPUs and `--constraint=gpu` with explicit
-`--gpus`/`--gpus-per-*` requests; Hipergator B200 directives must not be copied
-there.
-
-Use the persistent `pinn_training_smoke.toml` for an execution-path check.
-Keep all inputs, logs, datasets, models, plots, and caches in the checkout's
-ignored paths or `$PSCRATCH`; do not use `/tmp`, `$TMPDIR`, `mktemp`, or
-node-local temporary directories.
-
-Perlmutter project cap: one active interactive job maximum, and no more than
-half of any finite current QOS node limit. Current caps are 2 interactive
-nodes and 4 debug nodes. Ordinary SlabRpfPinn jobs request one node.
-
-Start with a reduced FV case, collocation set, and optimizer budget. Scale only
-after one complete batch job passes backend, parity, residual, and memory checks.
-cuDSS workspace and fill can dominate memory beyond raw CSR size.
-
-## Verification and reporting
-
-Use the narrowest meaningful check:
-
-- documentation/config change: Markdown inspection, TOML parse, `bash -n` for
-  actual batch files, and CLI help;
-- code rename or CLI change: compile, import/config check, and help output;
-- numerical change: focused structural test plus required GPU qualification;
-- training change: coefficient parity, short training smoke test, validation,
-  and metadata inspection.
-
-Do not run a full 100-case, million-point training job merely to validate a
-documentation or naming change. Report GPU tests separately from CPU checks.
-
-## Git handoff
-
-Inspect status before edits and again before staging. Stage exact paths:
-
-```bash
-git add <exact-paths>
-git diff --cached --check
-git diff --cached --stat
-git diff --cached
-```
-
-Keep generated files and unrelated parent-repository changes unstaged. Use one
-focused Conventional Commit when requested. Do not push automatically.
+Report changed paths, verification performed, runtime limitations, and any
+remaining cluster-specific requirement. Keep generated data, models, logs,
+plots, and caches out of source control.

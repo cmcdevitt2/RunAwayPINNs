@@ -1,0 +1,2186 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\title{0D--2P Relativistic Electron Fokker--Planck Model\\Physical and Numerical Reference}
+\author{}
+\date{September 2026}
+
+\newcommand{\p}{p}
+\newcommand{\x}{\xi}
+\newcommand{\g}{\gamma}
+\newcommand{\N}{N}
+\newcommand{\f}{f}
+\newcommand{\Ebar}{\overline{E}}
+
+\begin{document}
+\maketitle
+
+\noindent
+This document specifies the spatially homogeneous 0D--2P forward relativistic
+electron Fokker--Planck model and its finite-volume realization.  Standalone mode
+includes electric-field acceleration, relativistic small-angle collisions,
+synchrotron radiation reaction, and an optional Chiu--Harvey large-angle
+secondary-electron source.  Standalone mode uses a prescribed constant plasma
+state.  A bulk-plasma driver is implemented and exchanges stage plasma states and
+kinetic current moments through a monolithic analytic-Newton solve while preserving
+the conservative finite-volume and direct-solver contracts defined here.
+
+The numerical reference covers the dimensional and normalized equations, fixed
+coefficient construction, conservative cell-content discretization, boundary
+conditions, implicit time integration, sparse CSR assembly, and PETSc direct solves,
+bulk-plasma coupling, and numerical qualification.  Its scope includes forward
+evolution, coupled evolution, and diagnostics required to qualify both paths.
+
+Revision v16.0 is the living physical and numerical reference for current forward
+and coupled implementations.  The equations and numerical conventions below are
+authoritative for the maintained solver, physics, data, and TOML files.
+
+%===============================================================================
+\section{Physical model}
+
+The present model is a spatially homogeneous, gyrotropic electron kinetic system in
+momentum magnitude and pitch angle.  Standalone mode prescribes all plasma quantities
+and holds them constant in time.  Coupled mode evolves a host-side bulk state and the
+kinetic state together at every TR--BDF2 stage; spatial transport remains outside the
+current model.  The physical system is defined below in dimensional form.  No reference
+normalization used by the numerical solver is introduced until the final subsection of
+this section.
+
+\subsection{Dimensional kinetic equation}
+
+The physical model is defined first in dimensional variables.  Let
+$F_e(P,\xi,t)$ be the gyrophase-averaged electron distribution function, where $P$ is
+the physical momentum magnitude and
+\begin{equation}
+ \xi \equiv \frac{P_\parallel}{P}\in[-1,1].
+\end{equation}
+The forward kinetic equation is
+\begin{equation}
+ \frac{\partial F_e}{\partial t}
+ = \mathcal C_{\rm sa}[F_e]
+ + \mathcal E[F_e]
+ + \mathcal R_{\rm syn}[F_e]
+ + \mathcal S_{\rm LA}[F_e].
+ \label{eq:dimensional_kinetic}
+\end{equation}
+Here $\mathcal C_{\rm sa}$ is the relativistic small-angle test-particle
+Fokker--Planck collision operator, $\mathcal E$ is acceleration by the parallel
+electric field, $\mathcal R_{\rm syn}$ is synchrotron radiation reaction, and
+$\mathcal S_{\rm LA}$ is either zero or the Chiu--Harvey large-angle
+secondary-electron gain operator defined below.  The same forward operator structure is standard in relativistic runaway-electron
+kinetics; see, for example, Ref.~\cite{BraamsKarney1989}.
+
+The dimensional distribution is defined such that its momentum-space integral gives the
+represented electron density,
+\begin{equation}
+ n_F(t)
+ = 2\pi\int_0^\infty P^2\,dP\int_{-1}^{1}F_e(P,\xi,t)\,d\xi,
+ \label{eq:dimensional_density}
+\end{equation}
+so that $n_F$ is the represented electron density.  The relativistic Lorentz factor
+and speed are
+\begin{equation}
+ \gamma(P)=\sqrt{1+\frac{P^2}{m_e^2c^2}},
+ \qquad
+ v(P)=\frac{P}{\gamma m_e},
+ \qquad
+ \beta(P)=\frac{v}{c}.
+ \label{eq:dimensional_kinematics}
+\end{equation}
+
+\subsection{Parallel electric-field operator}
+
+For an electron of charge $-e$ in a prescribed uniform parallel electric field
+$E_\parallel$, the momentum-space characteristics are
+\begin{equation}
+ \dot P_E=-eE_\parallel\xi,
+ \qquad
+ \dot\xi_E=-\frac{eE_\parallel}{P}(1-\xi^2).
+ \label{eq:electric_characteristics}
+\end{equation}
+The corresponding conservative kinetic operator is
+\begin{equation}
+ \mathcal E[F_e]
+ =-\frac{1}{P^2}\frac{\partial}{\partial P}
+   \left(P^2\dot P_E F_e\right)
+  -\frac{\partial}{\partial\xi}
+   \left(\dot\xi_E F_e\right).
+ \label{eq:electric_operator_dimensional}
+\end{equation}
+This is the standard homogeneous relativistic electric-field operator used in
+runaway-electron Fokker--Planck models; see
+Refs.~\cite{ConnorHastie1975}.
+
+\subsection{Small-angle test-particle collision-model hierarchy}
+
+The standalone kinetic model admits two test-particle approximations for the
+small-angle collision kernel.  The current CPU prototype uses the fully-relativistic
+and asymptotically matched model historically used in CODE.  The finite-temperature
+relativistic model defined first below remains the preferred reference formulation for
+future implementation.  These define two alternative
+\emph{thermal-log complete-screening base kernels}.  The physical coefficient construction
+then applies two common layers that are independent of which base kernel is selected:
+(i) energy-dependent Coulomb-logarithm matching of the electron--electron and
+electron--ion sectors, and (ii) partial-screening corrections from bound electrons.
+Neither layer modifies radial energy diffusion.  Thus changing the base kernel does not
+change the Coulomb-logarithm or screening prescription.  Section~2 specifies the same
+layered construction in the common solver normalization, without changing the grid, time
+integrator, or sparse-solver architecture.
+
+\paragraph{Finite-temperature relativistic test-particle model (reference formulation).}
+Small-angle collisions are represented by a linearized relativistic test-particle
+Fokker--Planck operator with radial drag, radial energy diffusion, and pitch-angle
+deflection,
+\begin{equation}
+ \mathcal C_{\rm sa}[F_e]
+ =\frac{1}{P^2}\frac{\partial}{\partial P}
+  \left[
+   P^2\left(
+      C_F^{(P)} F_e
+      + C_A^{(P)}\frac{\partial F_e}{\partial P}
+   \right)
+  \right]
+ +\frac{\nu_D}{2}\frac{\partial}{\partial\xi}
+  \left[(1-\xi^2)\frac{\partial F_e}{\partial\xi}\right].
+ \label{eq:collision_operator_dimensional}
+\end{equation}
+The dimensional radial coefficients are written in terms of the slowing-down and
+parallel diffusion frequencies as
+\begin{equation}
+ C_F^{(P)}=P\nu_s,
+ \qquad
+ C_A^{(P)}=\frac{P^2}{2}\nu_\parallel.
+ \label{eq:dimensional_collision_coeffs}
+\end{equation}
+Equation~\eqref{eq:collision_operator_dimensional} is the relativistic test-particle
+operator of Braams--Karney/Pike--Rose form.  Its thermal-log complete-screening base
+coefficients are written below; the common energy-dependent Coulomb-logarithm and
+partial-screening layers are then specified separately following
+Refs.~\cite{BraamsKarney1989,PikeRose2014,Hesslow2018Collision}.
+The field-particle part of the small-angle collision operator is not retained in the
+present model.
+
+The published collision coefficients are most compactly written using the auxiliary
+relativistic kinematic variables
+\begin{equation}
+ u\equiv\frac{P}{m_ec},
+ \qquad
+ \gamma=\sqrt{1+u^2},
+ \qquad
+ \Theta\equiv\frac{T_e}{m_ec^2}.
+ \label{eq:collision_auxiliary_variables}
+\end{equation}
+These dimensionless quantities are only arguments used to write the dimensional collision
+frequencies compactly; they do not constitute the reference normalization of the kinetic
+PDE used by the numerical solver.  Define the physical relativistic collision time
+\begin{equation}
+ \tau_c
+ =\frac{4\pi\epsilon_0^2m_e^2c^3}
+ {n_e e^4\ln\Lambda_0},
+ \label{eq:physical_collision_time}
+\end{equation}
+where $n_e$ and $T_e$ are the prescribed free-electron density and temperature and
+$\ln\Lambda_0$ is the thermal Coulomb logarithm.  Following the finite-temperature
+construction in Ref.~\cite{Hesslow2018Collision}, first define the finite-temperature
+\emph{thermal-log} complete-screening base by setting both collisional logarithms equal
+to $\ln\Lambda_0$.  It is useful to keep the electron--electron and electron--ion
+parts of the deflection frequency separate:
+\begin{align}
+ \nu_s^{\rm FT,0}
+ &=\frac{1}{\tau_c}\frac{\gamma^2}{u^3}
+   \frac{u^2}{\gamma^2}\Psi_s(u,\Theta),
+ \label{eq:physical_nus}\\
+ \nu_\parallel^{\rm FT,0}
+ &=\frac{1}{\tau_c}\frac{2\gamma\Theta}{u^3}\Psi_s(u,\Theta),
+ \label{eq:physical_nupar}\\
+ \nu_{D,ee}^{\rm FT,0}
+ &=\frac{1}{\tau_c}\frac{\gamma}{u^3}
+   \frac{2u}{\gamma}\Psi_D(u,\Theta),\\
+ \nu_{D,ei}^{\rm FT,0}
+ &=\frac{1}{\tau_c}\frac{\gamma}{u^3}Z_{\rm eff},\\
+ \nu_D^{\rm FT,0}
+ &=\nu_{D,ee}^{\rm FT,0}+\nu_{D,ei}^{\rm FT,0}.
+ \label{eq:physical_nud}
+\end{align}
+The finite-temperature relativistic functions are
+\begin{align}
+ \Psi_s
+ &=\frac{
+   \gamma^2\Psi_1-\Theta\Psi_0
+   +(\Theta\gamma-1)u e^{-\gamma/\Theta}}
+  {u^2K_2(1/\Theta)},
+ \label{eq:psis_physical}\\
+ \Psi_D
+ &=\frac{
+  (u^2\gamma^2+\Theta^2)\Psi_0
+  +\Theta(2u^4-1)\Psi_1
+  +\gamma\Theta[1+\Theta(2u^2-1)]u e^{-\gamma/\Theta}}
+  {2\gamma u^3K_2(1/\Theta)},
+ \label{eq:psid_physical}
+\end{align}
+with
+\begin{equation}
+ \Psi_0(u,\Theta)
+ =\int_0^u\frac{e^{-\sqrt{1+s^2}/\Theta}}{\sqrt{1+s^2}}\,ds,
+ \qquad
+ \Psi_1(u,\Theta)
+ =\int_0^u e^{-\sqrt{1+s^2}/\Theta}\,ds.
+ \label{eq:psi_integrals_physical}
+\end{equation}
+Here $K_2$ is the modified Bessel function of the second kind.  Numerically stable
+evaluation of Eqs.~\eqref{eq:psis_physical}--\eqref{eq:psi_integrals_physical}, including
+the low-$u$ limit, belongs to the numerical model in Sec.~2 rather than to the physical
+definition of the operator.
+
+The thermal logarithm appearing in Eq.~\eqref{eq:physical_collision_time} is
+\begin{equation}
+ \ln\Lambda_0
+ =14.9-\frac12\ln\left(\frac{n_e}{10^{20}\,{\rm m}^{-3}}\right)
+ +\ln\left(\frac{T_e}{1\,{\rm keV}}\right).
+ \label{eq:physical_thermal_log}
+\end{equation}
+
+\paragraph{Energy-dependent Coulomb-logarithm correction common to both base models.}
+The thermal-to-relativistic matching of the Coulomb logarithms is a physical correction
+layer, not part of the definition of either small-angle base kernel.  Following Hesslow
+et al.~\cite{Hesslow2018Collision}, define
+\begin{align}
+ \ln\Lambda_{ee}(u)
+ &=\ln\Lambda_0+\frac{1}{k}
+ \ln\left[
+  1+\left(\frac{2(\gamma-1)}{u_{Te}^2}\right)^{k/2}
+ \right],\\
+ \ln\Lambda_{ei}(u)
+ &=\ln\Lambda_0+\frac{1}{k}
+ \ln\left[1+\left(\frac{2u}{u_{Te}}\right)^k\right],
+ \qquad
+ u_{Te}=\sqrt{2\Theta},
+ \qquad k=5,
+ \label{eq:physical_matched_logs}
+\end{align}
+and the ratios
+\begin{equation}
+ R_{ee}(u)=\frac{\ln\Lambda_{ee}(u)}{\ln\Lambda_0},
+ \qquad
+ R_{ei}(u)=\frac{\ln\Lambda_{ei}(u)}{\ln\Lambda_0}.
+ \label{eq:physical_log_ratios}
+\end{equation}
+For either base $b\in\{\mathrm{FT},\mathrm{match}\}$, decompose its thermal-log
+complete-screening deflection frequency into electron--electron and electron--ion parts,
+$\nu_D^{b,0}=\nu_{D,ee}^{b,0}+\nu_{D,ei}^{b,0}$.  The common Coulomb-logarithm layer is
+then
+\begin{align}
+ \nu_s^{b,\rm CL}&=R_{ee}\,\nu_s^{b,0},\\
+ \nu_\parallel^{b,\rm CL}&=\nu_\parallel^{b,0},\\
+ \nu_D^{b,\rm CL}
+ &=R_{ee}\,\nu_{D,ee}^{b,0}
+  +R_{ei}\,\nu_{D,ei}^{b,0}.
+ \label{eq:physical_common_log_overlay}
+\end{align}
+Thus the electron--electron logarithm corrects collisional drag and the
+ electron--electron part of pitch-angle deflection, the electron--ion logarithm corrects
+only the electron--ion deflection sector, and radial energy diffusion is unchanged.
+For the finite-temperature base the split is explicit in
+Eqs.~\eqref{eq:physical_nus}--\eqref{eq:physical_nud}.  For the matched base, the
+$Z_{\rm eff}$ part of the deflection coefficient is the electron--ion sector and the
+remaining deflection terms are the electron--electron sector, as made explicit in the
+solver-normalized formulas in Sec.~2.
+
+\paragraph{Partial-screening correction common to both base models.}
+For a partially ionized ion species $a$ with atomic number $Z_a$, ion charge
+$Z_{0a}$, density $n_a$, and number of bound electrons $N_a=Z_a-Z_{0a}$, define
+\cite{Hesslow2017Screening,Hesslow2018Collision}
+\begin{align}
+ h(u)
+ &=\sum_a\frac{n_a}{n_e}N_a
+ \left\{
+  \frac15\ln\left[
+   1+\left(\frac{u\sqrt{\gamma-1}}{I_a/(m_ec^2)}\right)^5
+  \right]-\beta^2
+ \right\},
+ \label{eq:physical_h}\\
+ g(u)
+ &=\sum_a\frac{n_a}{n_e}
+ \left\{
+  \frac23(Z_a^2-Z_{0a}^2)
+       \ln\left[1+(u\bar a_a)^{3/2}\right]
+  -\frac23N_a^2
+       \frac{(u\bar a_a)^{3/2}}{1+(u\bar a_a)^{3/2}}
+ \right\}.
+ \label{eq:physical_g}
+\end{align}
+Here $I_a$ is the mean excitation energy and $\bar a_a$ is the dimensionless screening
+length defined in Ref.~\cite{Hesslow2018Collision}.  The corresponding physical
+frequency corrections are
+\begin{align}
+ \Delta\nu_s^{\rm PS}
+ &=\frac{1}{\tau_c}\frac{\gamma^2}{u^3}
+   \frac{h(u)}{\ln\Lambda_0},\\
+ \Delta\nu_\parallel^{\rm PS}&=0,\\
+ \Delta\nu_D^{\rm PS}
+ &=\frac{1}{\tau_c}\frac{\gamma}{u^3}
+   \frac{g(u)}{\ln\Lambda_0}.
+ \label{eq:physical_partial_screening_overlay}
+\end{align}
+When state-resolved charge populations are supplied, each species sum in
+Eqs.~\eqref{eq:physical_h}--\eqref{eq:physical_g} also sums over charge state.  For
+charge state $q$, use
+\begin{equation}
+ Z_{0a}=q,\qquad N_{a,q}=Z_a-q,\qquad
+ I_a=I_{a,q},\qquad \bar a_a=\bar a_{a,q},\qquad
+ n_a=n_{a,q}.
+ \label{eq:physical_resolved_screening_inputs}
+\end{equation}
+The code uses this state-resolved form in coupled mode.  Scalar $Z_{0a}$, $I_a$, and
+$\bar a_a$ inputs remain available in standalone mode.
+For neutral deuterium, the configured effective screening length is
+$\bar a_{\mathrm{D^0}}=190$; the fully stripped state uses the zero sentinel because
+its partial-screening correction vanishes.
+For either base kernel, the partial-screening correction is applied after the common
+energy-dependent Coulomb-logarithm layer.  Equivalently,
+$\Delta C_F^{(P),\rm PS}=P\Delta\nu_s^{\rm PS}$,
+$\Delta C_A^{(P),\rm PS}=0$, and the deflection coefficient receives
+$\Delta\nu_D^{\rm PS}$.  The final physical frequencies are therefore
+\begin{align}
+ \nu_s^b&=\nu_s^{b,\rm CL}+\Delta\nu_s^{\rm PS},\\
+ \nu_\parallel^b&=\nu_\parallel^{b,\rm CL}=\nu_\parallel^{b,0},\\
+ \nu_D^b&=\nu_D^{b,\rm CL}+\Delta\nu_D^{\rm PS},
+ \qquad b\in\{\mathrm{FT},\mathrm{match}\}.
+ \label{eq:physical_final_collision_layers}
+\end{align}
+Thus neither the energy-dependent Coulomb-logarithm layer nor the partial-screening layer
+selects or blends the base operator, and neither modifies radial energy diffusion.
+
+The effective charge is
+\begin{equation}
+ Z_{\rm eff}=\frac{1}{n_e}\sum_a\sum_q n_{a,q}q^2,
+ \qquad
+ n_e=\sum_a\sum_q n_{a,q}q,
+ \label{eq:physical_zeff_resolved}
+\end{equation}
+with the scalar-ion form recovered when each species has one nonzero charge state.
+In the complete-screening limit $N_a=0$ for every species, the screening corrections
+vanish identically, $h=g=0$, while the common energy-dependent Coulomb-logarithm layer
+remains active.  Setting additionally $R_{ee}=R_{ei}=1$ recovers the corresponding
+thermal-log base kernel exactly.
+
+
+\paragraph{Fully-relativistic and asymptotically matched test-particle model.}
+The second selectable thermal-log complete-screening base collision kernel is the fully-relativistic,
+asymptotically matched test-particle operator.  Stahl et al. describe its construction as
+an asymptotic matching of the usual non-relativistic test-particle Fokker--Planck
+operator to the fully relativistic high-energy test-particle limit
+\cite{Stahl2016}.  The resulting momentum-space coefficients retain relativistic
+kinematics throughout the represented tail while assuming a non-relativistic thermal
+bulk.  This is historically the test-particle operator used in CODE, but CODE is
+provenance rather than the model name.  It is not the finite-temperature
+Braams--Karney/Pike--Rose operator above, and it does not contain the field-particle part
+of the linearized collision operator.
+
+For provenance and comparison with Stahl et al., it is useful to state this model in
+the normalized variables used in their CODE implementation.  Choose a reference thermal speed
+\begin{equation}
+ \widetilde v_e=\sqrt{\frac{2\widetilde T_e}{m_e}},\qquad
+ \delta\equiv\frac{\widetilde v_e}{c},
+\end{equation}
+and define
+\begin{equation}
+ y\equiv\frac{P}{m_e\widetilde v_e}=\frac{u}{\delta},\qquad
+ x\equiv\frac{y}{\gamma}=\frac{v}{\widetilde v_e},\qquad
+ \overline v_e\equiv\frac{v_e}{\widetilde v_e},\qquad
+ v_e=\sqrt{\frac{2T_e}{m_e}}.
+ \label{eq:matched_variables}
+\end{equation}
+With time normalized to a reference electron--electron collision frequency
+$\widetilde\nu_{ee}$, the fully-relativistic asymptotically matched test-particle operator is
+\begin{equation}
+ \boxed{
+ \widehat{\mathcal C}_{\rm match}^{\rm tp}[G]
+ =c_C\overline v_e^{\,3}y^{-2}
+ \left\{
+ \frac{\partial}{\partial y}
+ \left[
+  y^2\Psi
+  \left(
+   \frac{1}{x}\frac{\partial}{\partial y}
+   +\frac{2}{\overline v_e^{\,2}}
+  \right)G
+ \right]
+ +\frac{c_\xi}{2x}\frac{\partial}{\partial\xi}
+ \left[(1-\xi^2)\frac{\partial G}{\partial\xi}\right]
+ \right\},
+ }
+ \label{eq:matched_tp_operator}
+\end{equation}
+where a bar denotes normalization to the reference plasma state, in particular
+$\overline\nu_{ee}=\nu_{ee}/\widetilde\nu_{ee}$, and
+\begin{align}
+ c_C&=\frac{3\sqrt{\pi}}{4}\,\overline\nu_{ee},\\
+ c_\xi&=Z_{\rm eff}+\Phi-\Psi
+       +\frac{\overline v_e^{\,2}\delta^4x^2}{2},
+ \label{eq:matched_coefficients}
+\end{align}
+with
+\begin{equation}
+ \Phi=\operatorname{erf}\!\left(\frac{x}{\overline v_e}\right),\qquad
+ \Psi=\frac{\overline v_e^{\,2}}{2x^2}
+ \left[
+  \Phi-\frac{x}{\overline v_e}
+  \frac{d\Phi}{d(x/\overline v_e)}
+ \right].
+ \label{eq:matched_chandrasekhar}
+\end{equation}
+For a constant plasma chosen equal to the reference state,
+$\overline v_e=\overline\nu_{ee}=1$.  The assumption $\delta\ll1$ is the
+non-relativistic-bulk ordering of this model.  The role of
+Eq.~\eqref{eq:matched_tp_operator} in the model hierarchy is specifically to
+recover the standard non-relativistic test-particle coefficients at thermal and
+suprathermal energies while matching to the relativistic test-particle asymptote at
+large momentum \cite{Stahl2016}.  This provides a useful fully-relativistic asymptotically matched configuration for
+benchmarks without replacing the finite-temperature relativistic baseline above.  For this matched base, the slowing-down coefficient is electron--electron, the
+$Z_{\rm eff}$ contribution to pitch-angle deflection is electron--ion, and the remaining
+pitch-angle-deflection terms are electron--electron.  Consequently the same common
+Coulomb-logarithm layer in Eq.~\eqref{eq:physical_common_log_overlay} applies to this
+base without introducing a matched-model-specific logarithm prescription.  When bound
+electrons are present, the same Eq.~\eqref{eq:physical_partial_screening_overlay}
+correction is then added; no separate screening prescription is introduced either.
+
+\subsection{Synchrotron radiation-reaction operator}
+
+The gyro-averaged synchrotron radiation-reaction force is represented by the
+momentum-space characteristics
+\begin{equation}
+ \dot P_{\rm syn}
+ =-\frac{\gamma P}{\tau_s}(1-\xi^2),
+ \qquad
+ \dot\xi_{\rm syn}
+ =\frac{\xi}{\gamma\tau_s}(1-\xi^2),
+ \label{eq:synch_characteristics}
+\end{equation}
+with
+\begin{equation}
+ \tau_s=\frac{6\pi\epsilon_0m_e^3c^3}{e^4B^2}.
+ \label{eq:synch_time}
+\end{equation}
+The conservative operator is
+\begin{equation}
+ \mathcal R_{\rm syn}[F_e]
+ =-\frac{1}{P^2}\frac{\partial}{\partial P}
+   \left(P^2\dot P_{\rm syn}F_e\right)
+  -\frac{\partial}{\partial\xi}
+   \left(\dot\xi_{\rm syn}F_e\right).
+ \label{eq:synch_operator_dimensional}
+\end{equation}
+This is the standard gyro-averaged synchrotron reaction used in homogeneous
+runaway-electron kinetic models; see Refs.~\cite{Andersson2001}.
+
+\subsection{Chiu--Harvey large-angle secondary-electron gain}
+
+The production model uses a single optional large-angle secondary-electron gain model:
+the finite-primary-energy, aligned-primary Chiu--Harvey source
+\cite{Chiu1998,Harvey2000}.  The source is gain only: it adds the represented
+secondary electron but does not include the compensating recoil/loss of the primary.
+The source may be disabled by setting $\mathcal S_{\rm LA}=0$.
+
+Introduce the dimensionless momenta
+\begin{equation}
+ u\equiv\frac{P}{m_ec},\qquad
+ u'\equiv\frac{P'}{m_ec},\qquad
+ \gamma=\sqrt{1+u^2},\qquad
+ \gamma'=\sqrt{1+u'^2},
+ \label{eq:ch_auxiliary_momenta}
+\end{equation}
+and the rescaled distribution
+\begin{equation}
+ \widehat F_e(u,\xi,t)\equiv(m_ec)^3F_e(P,\xi,t).
+ \label{eq:ch_hat_definition}
+\end{equation}
+This is only a change of momentum coordinate; it is not the reference normalization of
+Sec.~\ref{sec:normalization}.  Define the pitch-integrated primary spectrum
+\begin{equation}
+ \boxed{
+ \mathcal F(u',t)=\int_{-1}^{1}\widehat F_e(u',\xi',t)\,d\xi'.
+ }
+ \label{eq:ch_primary_spectrum}
+\end{equation}
+The Chiu--Harvey approximation retains this evolving primary energy spectrum but uses a
+field-aligned primary direction, $\xi'=-1$, in the relativistic electron--electron
+knock-on kinematics.
+
+The normalized M{\o}ller differential cross section underlying the Chiu--Harvey source is
+\cite{Moller1932,Chiu1998,Harvey2000}
+\begin{equation}
+ \frac{d\overline\sigma_{\rm ee}(\gamma',\gamma)}{du}
+ =2\pi
+ \frac{\beta\,\gamma'^2}{(\gamma'-1)^3(\gamma'+1)}
+ \left[
+  x^2-3x+\left(\frac{\gamma'-1}{\gamma'}\right)^2(1+x)
+ \right],
+ \label{eq:ch_knockon_cross_section}
+\end{equation}
+where $\overline\sigma_{\rm ee}=\sigma_{\rm ee}/r_e^2$,
+\begin{equation}
+ \beta=\frac{u}{\gamma},\qquad
+ x=\frac{(\gamma'-1)^2}{(\gamma-1)(\gamma'-\gamma)},\qquad
+ r_e=\frac{e^2}{4\pi\epsilon_0m_ec^2}.
+ \label{eq:ch_knockon_cross_section_aux}
+\end{equation}
+For the aligned primary, the secondary pitch is
+\begin{equation}
+ \xi_{\rm CH}(\gamma',\gamma)
+ =-\left[
+  \frac{(\gamma'+1)(\gamma-1)}{(\gamma'-1)(\gamma+1)}
+ \right]^{1/2}.
+ \label{eq:ch_secondary_pitch}
+\end{equation}
+The corresponding gain operator is
+\begin{equation}
+ \widehat S_{\rm CH}(u,\xi,t)
+ =\frac{n_t c r_e^2}{u^2}
+  \int_0^\infty du'\,u'^2\beta'
+  \frac{d\overline\sigma_{\rm ee}(\gamma',\gamma)}{du}
+  \delta\!\left[\xi-\xi_{\rm CH}(\gamma',\gamma)\right]
+  \mathcal F(u',t),
+ \label{eq:ch_integral_source}
+\end{equation}
+with $\beta'=u'/\gamma'$.  Thus no prescribed analytic primary spectrum is introduced:
+$\mathcal F$ is obtained directly from the evolving 2P solution.
+
+Equation~\eqref{eq:ch_integral_source} can be reduced analytically over $u'$.  The
+required primary root is
+\begin{equation}
+ u'_0
+ =-\frac{2u\xi}{1+\xi^2-\gamma(1-\xi^2)}
+ =\frac{2u|\xi|}{1+\xi^2-\gamma(1-\xi^2)},
+ \qquad \xi<0,
+ \label{eq:ch_primary_root}
+\end{equation}
+with Jacobian
+\begin{equation}
+ \left|
+ \frac{\partial(\xi-\xi_{\rm CH})}{\partial u'}
+ \right|_{u'=u'_0}
+ =\frac{|\xi|}{u'_0\gamma'_0},
+ \qquad \gamma'_0=\sqrt{1+u_0'^2}.
+ \label{eq:ch_delta_jacobian}
+\end{equation}
+Using $\beta'_0=u'_0/\gamma'_0$ gives
+\begin{equation}
+ \boxed{
+ \widehat S_{\rm CH}(u,\xi,t)
+ =\frac{n_t c r_e^2}{u^2}
+  \frac{d\overline\sigma_{\rm ee}(u'_0,u)}{du}
+  \frac{u_0'^4}{|\xi|}\,
+  \mathcal F(u'_0,t),
+ }
+ \label{eq:ch_reduced_source}
+\end{equation}
+when the root satisfies the kinematic and domain constraints, and zero otherwise.
+
+A large-angle cutoff $P_m$ avoids double counting scattering already represented
+by the small-angle Fokker--Planck operator.  In the current prototype it is set equal
+to the fixed kinetic lower boundary, $P_m=P_{\min}$.  With
+\begin{equation}
+ \epsilon_m=\sqrt{1+(P_m/m_ec)^2}-1,
+\end{equation}
+the retained secondary kinetic energy $\epsilon_s=\gamma-1$ for a primary with
+$\epsilon_p=\gamma'-1$ satisfies
+\begin{equation}
+ \epsilon_s\in\left[\epsilon_m,\frac{\epsilon_p}{2}\right].
+ \label{eq:ch_energy_range}
+\end{equation}
+The source is also zero if the root in Eq.~\eqref{eq:ch_primary_root} lies outside the
+represented primary radial domain.
+
+The dimensional large-angle term is therefore simply
+\begin{equation}
+ \boxed{
+ \mathcal S_{\rm LA}[F_e](P,\xi,t)
+ \in\left\{0,\;\frac{1}{(m_ec)^3}\widehat S_{\rm CH}(u,\xi,t)\right\}.
+ }
+ \label{eq:large_angle_physical_choices}
+\end{equation}
+The target density $n_t$ is explicit and denotes the population treated as cold
+stationary target electrons for the knock-on source.  For the partially ionized
+application of Ref.~, $n_t$ is the total free-plus-bound electron
+density; in the standalone solver it is an explicit prescribed physical input.
+
+\subsection{Prescribed plasma state, initial condition, and moments}
+
+For standalone mode, the prescribed quantities
+\begin{equation}
+ \left\{T_e,n_e,E_\parallel,B,n_a,Z_a,Z_{0a},I_a,\bar a_a,n_t,P_{\min}\right\},
+ \qquad P_m=P_{\min}
+\end{equation}
+are constant in time.  Consequently every coefficient in
+Eq.~\eqref{eq:dimensional_kinetic} is time independent.  In coupled mode, the same
+physical coefficient construction is reevaluated at each bulk stage.
+
+The initial condition is an arbitrary non-negative gyrotropic distribution
+\begin{equation}
+ F_e(P,\xi,0)=F_{e0}(P,\xi).
+ \label{eq:dimensional_initial_condition}
+\end{equation}
+Useful physical moments include the represented density in
+Eq.~\eqref{eq:dimensional_density} and the parallel current density
+\begin{equation}
+ j_\parallel(t)
+ =-e\,2\pi\int_0^\infty P^2\,dP\int_{-1}^{1}
+  v(P)\,\xi\,F_e(P,\xi,t)\,d\xi.
+ \label{eq:dimensional_current}
+\end{equation}
+Additional moments may be formed from the same distribution without modifying the
+kinetic equation.  The total kinetic current in Eq.~\eqref{eq:dimensional_current}
+is a diagnostic moment and is not, by itself, a threshold-defined runaway-electron
+current.
+
+For a user-selected diagnostic threshold $\kappa$, a thresholded runaway current
+would instead be defined by
+\begin{equation}
+ j_{\rm RE}^{(\kappa)}(t)
+ =-e\,2\pi\int_0^\infty P^2\,dP\int_{-1}^{1}
+ v(P)\,\xi\,F_e(P,\xi,t)\,
+ \mathbf 1_{\{\gamma(P)-1>\kappa T_e/(m_ec^2)\}}\,d\xi,
+ \qquad
+ I_{\rm RE}^{(\kappa)}=A j_{\rm RE}^{(\kappa)}.
+ \label{eq:threshold_runaway_current}
+\end{equation}
+The full moment $j_\parallel$ remains available as a diagnostic.  The provisional
+CPU coupling uses the thresholded non-thermal moment in
+Eq.~\eqref{eq:threshold_runaway_current}; the precise current closure remains an
+open model decision and must be qualified against the full-moment alternative.  The
+Chiu--Harvey cutoff is set equal to the kinetic lower boundary,
+$P_m=P_{\min}$, in the current prototype.
+
+The implemented Maxwell--J{\"u}ttner initial condition uses the dimensionless momentum
+$p=P/(m_ec)$ and temperature $\Theta_i=T_i/(m_ec^2)$.  Its unnormalised isotropic shape is
+\begin{equation}
+ F_{\rm MJ}(p,\xi;T_i)\propto
+ \exp\left[-\frac{\sqrt{1+p^2}-1}{\Theta_i}\right],
+ \qquad -1\leq\xi\leq1,
+ \label{eq:maxwell_juttner_initial}
+\end{equation}
+and the finite-volume projection normalises the represented density to the configured
+$n_{\rm init}$ (or $n_e$).  An optional seed is mixed by particle content; it does not
+increase the configured total density.
+
+\subsection{Normalization used by the numerical model}
+\label{sec:normalization}
+
+Only after the dimensional physical model has been defined do we introduce the
+normalization used in Sec.~2.  The local flux form below is common to both specified
+test-particle small-angle configurations; Sec.~2 supplies the model-specific values of
+$C_F$, $C_A$, and $\nu_D$.  The large-angle term is selected independently as either none or Chiu--Harvey.  Choose a fixed reference density $n_{\rm ref}$
+and reference Coulomb logarithm $\ln\Lambda_{\rm ref}$ and define
+\begin{equation}
+ \tau_{\rm ref}
+ =\frac{4\pi\epsilon_0^2m_e^2c^3}
+ {n_{\rm ref}e^4\ln\Lambda_{\rm ref}},
+ \qquad
+ E_{\rm ref}=\frac{m_ec}{e\tau_{\rm ref}}.
+ \label{eq:reference_scales}
+\end{equation}
+The dimensionless numerical variables are
+\begin{equation}
+ p=\frac{P}{m_ec},
+ \qquad
+ \tau=\frac{t}{\tau_{\rm ref}},
+ \qquad
+ f(p,\xi,\tau)=\frac{(m_ec)^3}{n_{\rm ref}}F_e(P,\xi,t),
+ \qquad
+ \bar E=\frac{E_\parallel}{E_{\rm ref}}.
+ \label{eq:numerical_normalization}
+\end{equation}
+The normalization is fixed for the calculation and does not alter the dimensional
+physics.  In particular,
+\begin{equation}
+ \frac{n_F}{n_{\rm ref}}
+ =2\pi\int_0^\infty p^2\,dp\int_{-1}^{1}f(p,\xi,\tau)\,d\xi.
+ \label{eq:normalized_density}
+\end{equation}
+Define normalized collision coefficients
+\begin{equation}
+ C_F=p\tau_{\rm ref}\nu_s,
+ \qquad
+ C_A=\frac{p^2}{2}\tau_{\rm ref}\nu_\parallel,
+ \qquad
+ \nu_D^{\ast}=\tau_{\rm ref}\nu_D,
+ \qquad
+ \alpha=\frac{\tau_{\rm ref}}{\tau_s}.
+ \label{eq:normalized_coefficients}
+\end{equation}
+In the remainder of the document the star is dropped and $\nu_D$ denotes the
+normalized deflection frequency.
+
+With these definitions the normalized forward equation used by the numerical model is
+\begin{equation}
+ \frac{\partial f}{\partial\tau}
+ =-\frac{1}{p^2}\frac{\partial}{\partial p}\left(p^2J_p\right)
+  -\frac{\partial J_\xi}{\partial\xi}
+  +S_{\rm LA}[f],
+ \label{eq:normalized_forward}
+\end{equation}
+with local fluxes
+\begin{align}
+ J_p
+ &=A_p f-C_A\frac{\partial f}{\partial p},
+ \label{eq:normalized_Jp}\\
+ J_\xi
+ &=A_\xi f
+   -\frac{\nu_D}{2}(1-\xi^2)\frac{\partial f}{\partial\xi},
+ \label{eq:normalized_Jxi}
+\end{align}
+and
+\begin{align}
+ A_p
+ &=-\bar E\,\xi
+   -\alpha\gamma p(1-\xi^2)
+   -C_F,
+ \label{eq:normalized_Ap}\\
+ A_\xi
+ &=(1-\xi^2)
+   \left(-\frac{\bar E}{p}+\alpha\frac{\xi}{\gamma}\right).
+ \label{eq:normalized_Axi}
+\end{align}
+The normalized knock-on event-rate scale follows directly from
+Eq.~\eqref{eq:ch_integral_source}.  Factoring the $2\pi$ contained in the normalized
+differential cross section in Eq.~\eqref{eq:ch_knockon_cross_section},
+\begin{equation}
+ \tau_{\rm ref}\,2\pi n_t c r_e^2
+ =\frac{n_t/n_{\rm ref}}{2\ln\Lambda_{\rm ref}}.
+ \label{eq:normalized_knockon_scale}
+\end{equation}
+This normalization is used by the Chiu--Harvey source.  For constant prescribed plasma
+parameters, all selected local coefficients and the Chiu--Harvey map are constant in
+time.  The coupled driver uses the same normalization while updating stage-dependent
+plasma coefficients.
+
+\section{Numerical model}
+%===============================================================================
+
+The standalone numerical problem is the constant-coefficient normalized forward equation
+\eqref{eq:normalized_forward}.  The current CPU prototype uses the fully-relativistic
+asymptotically matched thermal-log test-particle base coefficient set.  The common
+energy-dependent Coulomb-logarithm layer is then applied to the electron--electron and
+electron--ion sectors, and bound electrons activate the common partial-screening
+drag/deflection layer defined in Sec.~1.  Fully stripped species therefore remove only
+the partial-screening layer; the energy-dependent Coulomb logarithms remain part of the
+physical collision coefficients.  The finite-temperature base is retained in this
+document as a reference formulation for a future implementation.
+The large-angle gain is either disabled or Chiu--Harvey.  Every configuration uses the same physical
+finite-volume state in the phase-space measure $2\pi p^2\,dp\,d\xi$ and is advanced as
+part of one fully implicit linear kinetic operator.  For fixed physical parameters,
+configuration, mesh, and timestep, the standalone semidiscrete operator is linear and
+time independent.  The coupled driver retains linear kinetic stages but updates
+coefficients from host-side bulk stage states.
+
+\subsection{Finite-volume grid, representative points, and discrete state}
+
+The computational domain is
+\begin{equation}
+ p_{\min}\le p\le p_{\max},\qquad -1\le\xi\le1,
+\end{equation}
+and is discretized with a tensor-product mesh.  The current CPU implementation uses
+a hybrid radial mesh and a hybrid pitch mesh.  Thus $p_{\min}>0$ is required by the
+present logarithmic low-momentum segment; the current production configuration uses
+$p_{\min}=100\,{\rm eV}/(m_ec^2)$.  More generally, for the fixed nonthermal factor
+$\kappa=10$, the current cutoff is
+\begin{equation}
+ p_{\min}=\sqrt{\left(1+\frac{\kappa T_e}{m_ec^2}\right)^2-1}.
+ \label{eq:current_nonthermal_cutoff}
+\end{equation}
+The radial faces use a logarithmic segment from $p_{\min}$ to the fixed transition
+$p_\star=1$, followed by a uniform-in-$p$ segment from $p_\star$ to $p_{\max}$.
+The number of low-momentum cells is allocated in proportion to logarithmic range,
+\begin{equation}
+ N_{\rm low}=\operatorname{round}\left[
+ N_p\frac{\ln(p_\star/p_{\min})}{\ln(p_{\max}/p_{\min})}
+ \right],
+ \qquad N_{\rm high}=N_p-N_{\rm low}.
+ \label{eq:hybrid_radial_allocation}
+\end{equation}
+The radial faces and cell centers in each segment are
+\begin{equation}
+ p_{i+1/2}=p_{\min}\left(\frac{p_\star}{p_{\min}}\right)^{i/N_{\rm low}}
+ \quad (0\le i\le N_{\rm low}),
+ \qquad
+ p_{N_{\rm low}+m+1/2}=p_\star+
+ \frac{p_{\max}-p_\star}{N_{\rm high}}m
+ \quad (0\le m\le N_{\rm high}),
+ \label{eq:geometric_p_grid}
+\end{equation}
+and $p_i=\sqrt{p_{i-1/2}p_{i+1/2}}$ is used as the representative point in both
+segments.
+The distances used by the radial flux stencil are
+\begin{equation}
+ d_{p,1/2}=p_1-p_{1/2},\qquad
+ d_{p,i+1/2}=p_{i+1}-p_i\;(1\le i<N_p),\qquad
+ d_{p,N_p+1/2}=p_{N_p+1/2}-p_{N_p}.
+ \label{eq:geometric_p_distances}
+\end{equation}
+For pitch angle, the negative half uses uniformly spaced $\theta$ and the positive
+half remains uniformly spaced in $\xi$.  With
+$N_-=\lfloor N_\xi/2\rfloor$ and $N_+=N_\xi-N_-$,
+\begin{equation}
+ \xi_{j+1/2}=\cos\theta_{N_- -j},
+ \quad \theta_k=\frac{\pi}{2}+\frac{k\pi}{2N_-},
+ \quad 0\le j<N_-,
+ \qquad
+ \xi_{N_-+m+1/2}=\frac{m}{N_+},
+ \quad 0\le m\le N_+,
+ \label{eq:current_xi_grid}
+\end{equation}
+The pitch cell widths and center-to-face distances are
+\begin{equation}
+ \Delta\xi_j=\xi_{j+1/2}-\xi_{j-1/2},\qquad
+ d_{\xi,1/2}=\xi_1-\xi_{1/2},\qquad
+ d_{\xi,j+1/2}=\xi_{j+1}-\xi_j,
+ \qquad d_{\xi,N_\xi+1/2}=\xi_{N_\xi+1/2}-\xi_{N_\xi}.
+ \label{eq:current_xi_distances}
+\end{equation}
+The radial mapping is a living numerical choice: it will be replaced or retuned after
+momentum-resolution, boundary, and $p_{\max}$ convergence studies.  Resolution is
+obtained by increasing $N_p$ and $N_\xi$; the local radial spacing must resolve both
+the low-energy collision layer and the relativistic drift/radiation region.
+
+The primary finite-volume unknown is the exact normalized particle content of cell
+$(i,j)$,
+\begin{equation}
+ N_{ij}(\tau)
+ =2\pi\int_{p_{i-1/2}}^{p_{i+1/2}}p^2\,dp
+       \int_{\xi_{j-1/2}}^{\xi_{j+1/2}}f(p,\xi,\tau)\,d\xi.
+ \label{eq:cellcontent}
+\end{equation}
+The exact cell phase volume and piecewise-constant reconstruction are
+\begin{align}
+ V_{ij}
+ &=\frac{2\pi}{3}
+   \left(p_{i+1/2}^3-p_{i-1/2}^3\right)
+   \Delta\xi_j,
+ \label{eq:cellvolume}\\
+ f_{ij}&=\frac{N_{ij}}{V_{ij}}.
+ \label{eq:cell_reconstruction}
+\end{align}
+The PETSc implementation stores $N_{ij}$ as the primary kinetic state and reconstructs
+$f_{ij}$ only when evaluating local fluxes, coefficients, currents, or diagnostics.
+The current logarithmic grid has $p_{\min}>0$, so the first cell terminates on the
+prescribed inner boundary.  A future origin-touching grid with $p_{\min}=0$ would impose
+regularity through the vanishing radial surface area and would require no coefficient at
+$p=0$ itself.
+
+The continuous initial condition is projected into this same finite-volume measure,
+\begin{equation}
+ N_{ij}^{0}
+ =2\pi\int_{p_{i-1/2}}^{p_{i+1/2}}p^2\,dp
+       \int_{\xi_{j-1/2}}^{\xi_{j+1/2}}f_0(p,\xi)\,d\xi.
+ \label{eq:initial_projection}
+\end{equation}
+The projection is evaluated analytically when possible and otherwise by converged
+Gauss--Legendre quadrature; point sampling of $f_0$ at the cell center is not used as
+a substitute for Eq.~\eqref{eq:initial_projection}.
+
+\subsection{Numerical evaluation of the fixed physical coefficients}
+
+All physical coefficients are time independent for the present problem and are therefore
+evaluated once before the kinetic operator is assembled.  The current CPU implementation
+reduces the fully-relativistic asymptotically matched base and its common correction
+layers to the three coefficient arrays $C_F(p)$, $C_A(p)$, and $\nu_D(p)$ consumed by
+the finite-volume fluxes below.  The coefficient pipeline is
+\begin{equation}
+ \begin{aligned}
+ \text{thermal-log base}
+ &\;\longrightarrow\;\text{common energy-dependent Coulomb logs}\\
+ &\;\longrightarrow\;\text{common partial screening}
+ \;\longrightarrow\;\{C_F,C_A,\nu_D\}.
+ \end{aligned}
+ \label{eq:collision_layer_pipeline}
+\end{equation}
+Selecting a collision model therefore changes only the base coefficient generation, not
+the two common correction layers or the finite-volume stencil.  Define once for both
+bases
+\begin{equation}
+ \chi_c=\frac{n_e}{n_{\rm ref}}
+        \frac{\ln\Lambda_0}{\ln\Lambda_{\rm ref}}.
+ \label{eq:common_collision_scaling}
+\end{equation}
+
+\paragraph{Finite-temperature relativistic coefficient evaluation (future reference).}
+The finite-temperature collision functions in
+Eqs.~\eqref{eq:psis_physical}--\eqref{eq:psi_integrals_physical} must be evaluated in a
+form that remains accurate both at low temperature and as $p\rightarrow0$.  The
+numerical treatment below is an alternative evaluation of the same functions defined in
+Sec.~1; it does not introduce a different collision model.
+
+\subparagraph{Exponentially scaled rapidity representation.}
+With
+\begin{equation}
+ p=\sinh y,\qquad \gamma=\cosh y,
+ \label{eq:rapidity_substitution}
+\end{equation}
+define
+\begin{align}
+ \widetilde\Psi_0(p,\Theta)
+ &\equiv e^{1/\Theta}\Psi_0(p,\Theta)
+ =\int_0^{\operatorname{asinh}p}
+   e^{-[\cosh y-1]/\Theta}\,dy,
+ \label{eq:psi0_scaled}\\
+ \widetilde\Psi_1(p,\Theta)
+ &\equiv e^{1/\Theta}\Psi_1(p,\Theta)
+ =\int_0^{\operatorname{asinh}p}
+   e^{-[\cosh y-1]/\Theta}\cosh y\,dy,
+ \label{eq:psi1_scaled}\\
+ \widetilde K_2(\Theta)
+ &\equiv e^{1/\Theta}K_2(1/\Theta)
+ =\int_0^\infty
+   e^{-[\cosh y-1]/\Theta}\cosh(2y)\,dy.
+ \label{eq:k2_scaled}
+\end{align}
+The scaled collision functions are therefore evaluated directly as
+\begin{align}
+ \Psi_s^{\rm dir}(p,\Theta)
+ &=\frac{
+   \gamma^2\widetilde\Psi_1-\Theta\widetilde\Psi_0
+   +(\Theta\gamma-1)p e^{-(\gamma-1)/\Theta}}
+  {p^2\widetilde K_2},
+ \label{eq:psis_scaled_direct}\\
+ \Psi_D^{\rm dir}(p,\Theta)
+ &=\frac{
+  (p^2\gamma^2+\Theta^2)\widetilde\Psi_0
+  +\Theta(2p^4-1)\widetilde\Psi_1
+  +\gamma\Theta[1+\Theta(2p^2-1)]p e^{-(\gamma-1)/\Theta}}
+  {2\gamma p^3\widetilde K_2}.
+ \label{eq:psid_scaled_direct}
+\end{align}
+Thus neither $e^{-1/\Theta}$ nor $K_2(1/\Theta)$ is formed separately.  The finite
+integrals in Eqs.~\eqref{eq:psi0_scaled} and \eqref{eq:psi1_scaled} are evaluated by
+Gauss--Legendre quadrature in $y$; the collision quadrature order $q_{\rm coll}$ is a
+numerical convergence parameter.  The same converged value of $\widetilde K_2$ is used
+in both the direct and low-$p$ branches.
+
+\subparagraph{Low-$p$ series.}
+Although Eqs.~\eqref{eq:psis_scaled_direct} and \eqref{eq:psid_scaled_direct} are free of
+thermal underflow, their numerators contain cancellations as $p\rightarrow0$.  The
+functions are therefore evaluated near the origin by their Taylor series obtained
+directly from the same equations.  Write
+\begin{align}
+ \Psi_s^{\rm ser}(p,\Theta)
+ &=\frac{p}{\widetilde K_2}
+   \sum_{m=0}^{6}a_{2m+1}(\Theta)p^{2m},
+ \label{eq:psis_lowp_series}\\
+ \Psi_D^{\rm ser}(p,\Theta)
+ &=\frac{1}{\widetilde K_2}
+   \sum_{m=0}^{6}b_{2m}(\Theta)p^{2m}.
+ \label{eq:psid_lowp_series}
+\end{align}
+The retained coefficients, corresponding to terms through $p^{13}$ in $\Psi_s$ and
+$p^{12}$ in $\Psi_D$, are
+\begin{align}
+ a_1&=\frac{2\Theta^2+2\Theta+1}{3\Theta},\\
+ a_3&=-\frac{6\Theta^3+6\Theta^2+5\Theta+3}{30\Theta^2},\\
+ a_5&=\frac{30\Theta^4+30\Theta^3+27\Theta^2+17\Theta+5}{280\Theta^3},\\
+ a_7&=-\frac{210\Theta^5+210\Theta^4+195\Theta^3+125\Theta^2+44\Theta+7}
+ {3024\Theta^4},\\
+ a_9&=\frac{1890\Theta^6+1890\Theta^5+1785\Theta^4+1155\Theta^3
+ +435\Theta^2+92\Theta+9}{38016\Theta^5},\\
+ a_{11}&=-\frac{20790\Theta^7+20790\Theta^6+19845\Theta^5+12915\Theta^4
+ +5040\Theta^3+1197\Theta^2+167\Theta+11}{549120\Theta^6},\\
+ a_{13}&=\frac{270270\Theta^8+270270\Theta^7+259875\Theta^6+169785\Theta^5
+ +67725\Theta^4+17136\Theta^3+2786\Theta^2+275\Theta+13}
+ {8985600\Theta^7},
+ \label{eq:psis_lowp_coeffs}
+\end{align}
+and
+\begin{align}
+ b_0&=\frac{8\Theta^2+5\Theta+4}{12},\\
+ b_2&=\frac{64\Theta^3+79\Theta^2+30\Theta-8}{240\Theta},\\
+ b_4&=-\frac{768\Theta^4+873\Theta^3+274\Theta^2+53\Theta-12}
+ {3360\Theta^2},\\
+ b_6&=\frac{49152\Theta^5+53877\Theta^4+15594\Theta^3+3830\Theta^2
+ +572\Theta-80}{241920\Theta^3},\\
+ b_8&=-\frac{983040\Theta^6+1055805\Theta^5+292986\Theta^4+75031\Theta^3
+ +16876\Theta^2+1545\Theta-140}{5322240\Theta^4},\\
+ b_{10}&=\frac{47185920\Theta^7+50023755\Theta^6+13539990\Theta^5
+ +3487020\Theta^4+866196\Theta^3+136817\Theta^2+8050\Theta-504}
+ {276756480\Theta^5},\\
+ b_{12}&=-\frac{
+ \begin{aligned}
+  &440401920\Theta^8+462699195\Theta^7+123237750\Theta^6
+   +31617235\Theta^5+8090500\Theta^4\\
+  &\qquad{}+1515314\Theta^3+167034\Theta^2+6755\Theta-308
+ \end{aligned}
+ }{2767564800\Theta^6}.
+ \label{eq:psid_lowp_coeffs}
+\end{align}
+For numerical evaluation the two polynomials are evaluated in $z=p^2$ using Horner's
+rule.
+
+The baseline branch switch is fixed as
+\begin{equation}
+ p_{\rm sw}(\Theta)=0.1\min\!\left(1,\sqrt{\Theta}\right),
+ \label{eq:lowp_switch}
+\end{equation}
+with
+\begin{equation}
+ (\Psi_s,\Psi_D)=
+ \begin{cases}
+  (\Psi_s^{\rm ser},\Psi_D^{\rm ser}), & p\le p_{\rm sw}(\Theta),\\
+  (\Psi_s^{\rm dir},\Psi_D^{\rm dir}), & p>p_{\rm sw}(\Theta).
+ \end{cases}
+ \label{eq:collision_function_branch}
+\end{equation}
+This switch places the transition in a region where both $p$ and the thermal-scaled
+momentum $p/\sqrt{\Theta}$ are small.  It is fixed for the finite-temperature configuration rather than
+being treated as a user-adjustable modeling parameter.  The implementation must recover
+\begin{equation}
+ \Psi_s=O(p),\qquad \Psi_D=O(1),\qquad p\rightarrow0,
+ \label{eq:low_p_limits}
+\end{equation}
+and the direct and series branches must agree in the neighborhood of
+Eq.~\eqref{eq:lowp_switch} to the accuracy required of the coefficient evaluation.
+
+The corresponding normalized finite-temperature thermal-log base coefficients are
+\begin{align}
+ C_F^{\rm FT,0}(p)
+ &=\chi_c\,\Psi_s(p,\Theta),
+ \label{eq:ft_numeric_cf_base}\\
+ C_A^{\rm FT,0}(p)
+ &=\chi_c\,\frac{\gamma\Theta}{p}\Psi_s(p,\Theta),
+ \label{eq:ft_numeric_ca_base}\\
+ \nu_{D,ee}^{\rm FT,0}(p)
+ &=\chi_c\,\frac{2\Psi_D(p,\Theta)}{p^2},\\
+ \nu_{D,ei}^{\rm FT,0}(p)
+ &=\chi_c\,\frac{\gamma Z_{\rm eff}}{p^3},\\
+ \nu_D^{\rm FT,0}(p)
+ &=\nu_{D,ee}^{\rm FT,0}(p)+\nu_{D,ei}^{\rm FT,0}(p).
+ \label{eq:ft_numeric_nud_base}
+\end{align}
+These arrays contain the base-kernel dependence only; the common Coulomb-logarithm and
+partial-screening layers are applied below.
+
+\paragraph{Fully-relativistic asymptotically matched coefficient evaluation (current CPU operator).}
+For the current CPU configuration the reference plasma is chosen equal to the prescribed
+constant plasma state, so that $\overline v_e=\overline\nu_{ee}=1$ in
+Eqs.~\eqref{eq:matched_variables}--\eqref{eq:matched_coefficients}.  Define
+\begin{equation}
+ \delta=\sqrt{\frac{2T_e}{m_ec^2}},\qquad
+ x(p)=\frac{p}{\delta\gamma}.
+ \label{eq:matched_numeric_scalings}
+\end{equation}
+Transforming the fully-relativistic asymptotically matched operator from
+$y=p/\delta$ and its historical collision-time normalization to the common $(p,\tau)$
+variables of Sec.~\ref{sec:normalization} gives
+exactly the same conservative radial/pitch form used by the finite-volume solver.  Using
+the reference collision-frequency definition of Stahl et al.,
+\begin{equation}
+ \widetilde\nu_{ee}
+ =\frac{16\sqrt{\pi}\,n_e e^4\ln\Lambda_0}
+ {3m_e^2v_e^3(4\pi\epsilon_0)^2},
+ \qquad
+ (\tau_{\rm ref}\widetilde\nu_{ee})\frac{3\sqrt{\pi}}{4}
+ =\chi_c\delta^{-3}.
+ \label{eq:matched_numeric_frequency_conversion}
+\end{equation}
+The resulting thermal-log common-normalization base coefficients are
+\begin{align}
+ C_F^{\rm match,0}(p)
+ &=\chi_c\,\frac{2\Psi(x)}{\delta^2},
+ \label{eq:matched_numeric_cf}\\
+ C_A^{\rm match,0}(p)
+ &=\chi_c\,\frac{\gamma}{p}\Psi(x),
+ \label{eq:matched_numeric_ca}\\
+ \nu_{D,ee}^{\rm match,0}(p)
+ &=\chi_c\,\frac{\gamma}{p^3}
+ \left[
+  \Phi(x)-\Psi(x)+\frac{\delta^2p^2}{2\gamma^2}
+ \right],\\
+ \nu_{D,ei}^{\rm match,0}(p)
+ &=\chi_c\,\frac{\gamma}{p^3}Z_{\rm eff},\\
+ \nu_D^{\rm match,0}(p)
+ &=\nu_{D,ee}^{\rm match,0}(p)+\nu_{D,ei}^{\rm match,0}(p).
+ \label{eq:matched_numeric_nud}
+\end{align}
+Here
+\begin{equation}
+ \Phi(x)=\operatorname{erf}(x),\qquad
+ \Psi(x)=\frac{\Phi(x)-2x e^{-x^2}/\sqrt{\pi}}{2x^2}.
+ \label{eq:matched_numeric_phi_psi}
+\end{equation}
+
+The CPU prototype uses these matched expressions with its local collision-time
+normalization, equivalent to $n_{\rm ref}=n_e$, $\ln\Lambda_{\rm ref}=\ln\Lambda_0$,
+and hence $\chi_c=1$.  Including the implemented common logarithm and partial-screening
+layers, the actual arrays passed to the finite-volume operator are
+\begin{align}
+ C_F(p)&=R_{ee}(p)\frac{2\Psi(x)}{\delta^2}
+       +\frac{\gamma^2h(p)}{p^2\ln\Lambda_0},\\
+ C_A(p)&=\frac{\gamma}{p}\Psi(x),\\
+ \nu_D(p)&=\frac{\gamma}{p^3}\left[
+ R_{ee}(p)\left(\Phi(x)-\Psi(x)+\frac{\Theta p^2}{\gamma^2}\right)
+ +Z_{\rm eff}R_{ei}(p)+\frac{g(p)}{\ln\Lambda_0}\right].
+ \label{eq:cpu_matched_final_coefficients}
+\end{align}
+These are evaluated directly at the geometric-grid faces for radial fluxes and at cell
+centers for pitch-angle diffusion.  The finite-temperature rapidity quadrature and
+low-$p$ series are not used by the current CPU prototype.
+
+\paragraph{Common energy-dependent Coulomb-logarithm layer in solver normalization.}
+At every radial evaluation point, compute the same physical ratios as in
+Eq.~\eqref{eq:physical_log_ratios}, with $u=p$,
+\begin{equation}
+ R_{ee}(p)=\frac{\ln\Lambda_{ee}(p)}{\ln\Lambda_0},
+ \qquad
+ R_{ei}(p)=\frac{\ln\Lambda_{ei}(p)}{\ln\Lambda_0}.
+ \label{eq:numeric_log_ratios}
+\end{equation}
+For either $b\in\{\mathrm{FT},\mathrm{match}\}$ the Coulomb-logarithm-corrected
+complete-screening arrays are
+\begin{align}
+ C_F^{b,\rm CL}(p)
+ &=R_{ee}(p)\,C_F^{b,0}(p),
+ \label{eq:common_log_numeric_cf}\\
+ C_A^{b,\rm CL}(p)
+ &=C_A^{b,0}(p),
+ \label{eq:common_log_numeric_ca}\\
+ \nu_D^{b,\rm CL}(p)
+ &=R_{ee}(p)\,\nu_{D,ee}^{b,0}(p)
+  +R_{ei}(p)\,\nu_{D,ei}^{b,0}(p).
+ \label{eq:common_log_numeric_nud}
+\end{align}
+This step is identical for the two base choices.  In particular, changing the small-angle
+base model does not disable, replace, or redefine either energy-dependent Coulomb
+logarithm, and $C_A$ is unchanged by this layer.
+
+\paragraph{Common partial-screening overlay in solver normalization.}
+The same screening layer is applied after the common energy-dependent Coulomb-logarithm
+correction for either base coefficient set.  In the common normalized variables its
+contribution is
+\begin{align}
+ \Delta C_F^{\rm PS}(p)
+ &=\chi_c\,\frac{\gamma^2}{p^2}\frac{h(p)}{\ln\Lambda_0},
+ \label{eq:screening_numeric_cf}\\
+ \Delta C_A^{\rm PS}(p)&=0,
+ \label{eq:screening_numeric_ca}\\
+ \Delta\nu_D^{\rm PS}(p)
+ &=\chi_c\,\frac{\gamma}{p^3}\frac{g(p)}{\ln\Lambda_0}.
+ \label{eq:screening_numeric_nud}
+\end{align}
+Thus, for either $b\in\{\mathrm{FT},\mathrm{match}\}$,
+\begin{equation}
+ \boxed{
+ C_F=C_F^{b,\rm CL}+\Delta C_F^{\rm PS},\qquad
+ C_A=C_A^{b,\rm CL}=C_A^{b,0},\qquad
+ \nu_D=\nu_D^{b,\rm CL}+\Delta\nu_D^{\rm PS}.
+ }
+ \label{eq:common_screened_coefficients}
+\end{equation}
+The two base evaluations above therefore feed the finite-volume assembly through exactly
+the same Coulomb-logarithm and screening semantics.  When every ion is fully stripped,
+$h=g=0$ and Eq.~\eqref{eq:common_screened_coefficients} reduces to the selected base with
+the common energy-dependent Coulomb-logarithm correction still active.  If one also sets
+$R_{ee}=R_{ei}=1$, the corresponding thermal-log base is recovered exactly.  Disabling
+radial energy diffusion remains a separate explicit model switch and is applied after
+coefficient construction.
+Equations~\eqref{eq:matched_numeric_cf}--\eqref{eq:matched_numeric_nud} are a coordinate
+transformation of the Section-1 fully-relativistic asymptotically matched thermal-log base,
+not a new interpolation or fit.  The common logarithm corrections in
+Eqs.~\eqref{eq:common_log_numeric_cf}--\eqref{eq:common_log_numeric_nud} and the common
+partial-screening terms in Eqs.~\eqref{eq:screening_numeric_cf}--\eqref{eq:screening_numeric_nud}
+are then applied independently of the selected base.  The local finite-volume assembly
+receives the same three final coefficient arrays in either case.  The production default
+keeps radial energy diffusion.  A benchmark configuration may deliberately set $C_A=0$
+after coefficient evaluation; this is an explicit model switch and is never activated
+implicitly by mesh, temperature, screening, or large-angle settings.
+
+No rapidity quadrature or modified Bessel function is required for the current CPU
+configuration.  The code evaluates the Chandrasekhar functions directly from
+Eq.~\eqref{eq:matched_chandrasekhar} at the geometric-grid faces and centers, then
+applies the common logarithm and partial-screening overlays above.
+For the current shifted domain all coefficient faces lie at finite momentum, so there is
+no separate origin quadrature or singular coefficient evaluation to perform.  An
+origin-touching grid remains a future grid variant and would impose its inner flux
+directly.
+
+For qualification, the transformed thermal-log base coefficients must reproduce the
+Section-1 fully-relativistic asymptotically matched operator pointwise and recover its
+intended asymptotic limits.  In particular, for $p\gg1$ with $\delta\ll1$,
+\begin{equation}
+ C_F^{\rm match,0}\rightarrow\chi_c,\qquad
+ C_A^{\rm match,0}\rightarrow\frac{\chi_c\delta^2}{2},\qquad
+ \nu_D^{\rm match,0}\rightarrow
+ \chi_c\frac{1+Z_{\rm eff}}{p^2}
+ \quad\text{to leading order in }\delta.
+ \label{eq:matched_relativistic_limits}
+\end{equation}
+After the common Coulomb-logarithm layer, the corresponding complete-screening leading
+behavior is instead
+\begin{equation}
+ C_F^{\rm match,CL}\rightarrow\chi_c R_{ee}(p),\qquad
+ \nu_D^{\rm match,CL}\rightarrow
+ \frac{\chi_c}{p^2}\left[R_{ee}(p)+Z_{\rm eff}R_{ei}(p)\right],
+ \label{eq:matched_relativistic_limits_logs}
+\end{equation}
+while $C_A$ retains the base limit.  Partial screening adds the independent $h$ and $g$
+terms afterward.  The non-relativistic thermal/suprathermal limit of the base is checked
+directly against Eq.~\eqref{eq:matched_tp_operator} rather than by introducing a second
+numerical formula.
+
+\subsection{Conservative local flux discretization}
+
+Integrating the differential part of Eq.~\eqref{eq:normalized_forward} over a cell gives
+\begin{equation}
+ \frac{dN_{ij}}{d\tau}\bigg|_{\rm local}
+ =-\left(F^p_{i+1/2,j}-F^p_{i-1/2,j}\right)
+  -\left(F^\xi_{i,j+1/2}-F^\xi_{i,j-1/2}\right).
+ \label{eq:fv_balance}
+\end{equation}
+Each interior face flux is formed once and enters the two adjacent cells with opposite
+signs.  Interior conservation is therefore algebraic rather than approximate.
+
+The local drift--diffusion fluxes use the exponentially fitted Bernoulli form of the
+Chang--Cooper discretization.  When the diffusion coefficient vanishes, the implementation
+reduces to first-order upwinding.  This deliberately simple conservative choice is the
+baseline numerical scheme for the present solver.  Higher-order schemes are outside the
+scope of the present model and may be considered only after this formulation is fully
+qualified.
+
+Define the numerically stable Bernoulli function
+\begin{equation}
+ \mathcal B(z)=\frac{z}{e^z-1},\qquad \mathcal B(0)=1.
+ \label{eq:bernoulli_function}
+\end{equation}
+
+For an interior radial face, define
+\begin{equation}
+ A^p_{i+1/2,j}=A_p(p_{i+1/2},\xi_j),\qquad
+ C_{A,i+1/2}=C_A^{({\rm sel})}(p_{i+1/2}),
+\end{equation}
+and the face Peclet argument
+\begin{equation}
+ w^p_{i+1/2,j}=\frac{A^p_{i+1/2,j}d_{p,i+1/2}}{C_{A,i+1/2}}.
+ \label{eq:radial_peclet}
+\end{equation}
+For $C_{A,i+1/2}>0$, the integrated radial face flux is
+\begin{equation}
+ F^p_{i+1/2,j}
+ =2\pi p_{i+1/2}^2\Delta\xi
+ \left[
+   \frac{C_{A,i+1/2}}{d_{p,i+1/2}}
+ \left(
+   \mathcal B(-w^p_{i+1/2,j})f_{ij}
+  -\mathcal B(w^p_{i+1/2,j})f_{i+1,j}
+ \right)
+ \right].
+ \label{eq:radial_fv_flux}
+\end{equation}
+When $C_{A,i+1/2}=0$, Eq.~\eqref{eq:radial_fv_flux} is replaced by its first-order
+upwind drift limit.
+
+For an interior pitch face, define
+\begin{equation}
+ D_\xi(p,\xi)=\frac{\nu_D^{({\rm sel})}(p)}{2}(1-\xi^2),
+\end{equation}
+\begin{equation}
+ A^\xi_{i,j+1/2}=A_\xi(p_i,\xi_{j+1/2}),\qquad
+ D^\xi_{i,j+1/2}=D_\xi(p_i,\xi_{j+1/2}),
+\end{equation}
+and the face Peclet argument
+\begin{equation}
+ w^\xi_{i,j+1/2}=\frac{A^\xi_{i,j+1/2}d_{\xi,j+1/2}}{D^\xi_{i,j+1/2}}.
+ \label{eq:pitch_peclet}
+\end{equation}
+For $D^\xi_{i,j+1/2}>0$, the integrated pitch face flux is
+\begin{equation}
+ F^\xi_{i,j+1/2}
+ =\frac{2\pi}{3}
+  \left(p_{i+1/2}^3-p_{i-1/2}^3\right)
+ \left[
+  \frac{D^\xi_{i,j+1/2}}{d_{\xi,j+1/2}}
+ \left(
+   \mathcal B(-w^\xi_{i,j+1/2})f_{ij}
+  -\mathcal B(w^\xi_{i,j+1/2})f_{i,j+1}
+ \right)
+ \right].
+ \label{eq:pitch_fv_flux}
+\end{equation}
+When $D^\xi_{i,j+1/2}=0$, Eq.~\eqref{eq:pitch_fv_flux} is replaced by its first-order
+upwind drift limit.  The same Bernoulli/Chang--Cooper rule is therefore used in both
+momentum coordinates.  Accuracy is obtained by mesh refinement rather than by
+introducing a more elaborate spatial discretization at this stage.
+The superscript ``sel'' emphasizes that the stencil is independent of the selected
+small-angle collision model; only the precomputed coefficient values differ.
+
+\subsection{Boundary conditions}
+
+At the inner radial face, an origin-touching grid with $p_{\min}=0$ would use regularity
+and the vanishing radial surface area to impose
+\begin{equation}
+ F^p_{1/2,j}=0.
+ \label{eq:inner_zero_flux}
+\end{equation}
+For the current shifted domain $p_{\min}>0$, an absorbing zero-inflow/open-outflow
+condition is used.  The exterior distribution is zero: advective inflow is suppressed,
+advective drift with $A_p(p_{\min},\xi_j)<0$ leaves the represented domain, and, when
+radial diffusion is enabled, the boundary value $f=0$ is imposed at the face using the
+geometric center-to-face distance $d_{p,1/2}$.  This is the boundary used by the current
+suprathermal configuration.
+Numerically, the same Chang--Cooper face flux as the interior is used with the exterior
+state set to zero; for $C_A>0$ this gives
+\begin{equation}
+ F^p_{1/2,j}=-2\pi p_{\min}^2\Delta\xi_j\,
+ \frac{C_A}{d_{p,1/2}}\mathcal B(w^p_{1/2,j})f_{1j},
+ \qquad
+ w^p_{1/2,j}=\frac{A_p(p_{\min},\xi_j)d_{p,1/2}}{C_A}.
+ \label{eq:inner_absorbing_flux}
+\end{equation}
+
+At $\xi=\pm1$, both the pitch drift and diffusion coefficients vanish through
+$1-\xi^2$, so
+\begin{equation}
+ F^\xi_{i,1/2}=F^\xi_{i,N_\xi+1/2}=0.
+ \label{eq:pitch_boundary_flux}
+\end{equation}
+
+The outer radial boundary is a zero-inflow, open-outflow boundary.  The first-order
+boundary flux is
+\begin{equation}
+ F^p_{N_p+1/2,j}
+ =2\pi p_{\max}^2\Delta\xi_j,
+  \left[A_p(p_{\max},\xi_j)\right]_+ f_{N_p,j},
+ \qquad [a]_+\equiv\max(a,0),
+ \label{eq:outer_flux}
+\end{equation}
+with zero diffusive flux through the outer face and no incoming distribution supplied
+from $p>p_{\max}$.  The value of $p_{\max}$ is chosen sufficiently large that the
+reported solution is insensitive to further domain extension.  Domain-size convergence
+is tested by increasing $p_{\max}$ while independently monitoring the geometric radial
+resolution.
+
+\subsection{Discrete Chiu--Harvey large-angle gain}
+
+The large-angle configuration is selected independently of the small-angle collision
+model.  It is either disabled, $L_{\rm LA}=0$, or the Chiu--Harvey gain is enabled.  For
+constant prescribed plasma parameters the Chiu--Harvey source is a fixed linear map of
+the evolving finite-volume state and is retained in the same fully implicit TR--BDF2
+operator.
+
+\paragraph{Chiu--Harvey finite-energy aligned-primary gain.}
+The physical Chiu--Harvey gain operator is fully defined in
+Sec.~1, in particular by Eqs.~\eqref{eq:ch_primary_spectrum},
+\eqref{eq:ch_primary_root}, and \eqref{eq:ch_reduced_source}, together with the
+knock-on kinematic and cutoff conditions stated there.  The numerical model does not
+introduce a different large-angle collision model; it only evaluates that operator on
+the finite-volume mesh.
+
+For each radial cell, the pitch-integrated primary distribution appearing in
+Eq.~\eqref{eq:ch_primary_spectrum} is evaluated directly from the current 2P
+solution as
+\begin{equation}
+ \boxed{
+ \mathcal F_i(\tau)
+ =\Delta\xi\sum_{j=1}^{N_\xi} f_{ij}(\tau)
+ }
+ \label{eq:discrete_primary_spectrum}
+\end{equation}
+which is the pitch integral of the piecewise-constant reconstruction in radial cell
+$i$.  Thus the primary distribution used by the Chiu--Harvey source is the
+pitch-integrated distribution of the evolving kinetic solution itself; no separate
+primary distribution or analytic closure is introduced.
+
+For a target cell center $(p_i,\xi_j)$, evaluate the required primary momentum
+$p'_0(p_i,\xi_j)$ from Eq.~\eqref{eq:ch_primary_root}.  If the root and the associated
+secondary satisfy all of the knock-on kinematic and large-angle-cutoff conditions of
+Sec.~1, and if $p'_0$ lies inside the represented radial domain, let $k$ be the radial
+cell containing that momentum,
+\begin{equation}
+ p_{k-1/2}\le p'_0(p_i,\xi_j)<p_{k+1/2}.
+ \label{eq:ch_primary_cell}
+\end{equation}
+The first-order piecewise-constant representation gives
+\begin{equation}
+ \mathcal F\!\left(p'_0,\tau\right)\approx\mathcal F_k(\tau).
+ \label{eq:ch_piecewise_primary}
+\end{equation}
+The normalized Chiu--Harvey source at the target cell center is then obtained by direct
+substitution of this value into Eq.~\eqref{eq:ch_reduced_source}, using the normalization
+and event-rate scale of Sec.~\ref{sec:normalization}.  Denote that value by
+\begin{equation}
+ S_{{\rm CH},ij}(\tau)
+ =S_{\rm CH}[f](p_i,\xi_j,\tau).
+ \label{eq:ch_cell_center_source}
+\end{equation}
+If the Section-1 kinematic or cutoff conditions are not satisfied, then
+$S_{{\rm CH},ij}=0$.
+
+The corresponding finite-volume contribution is evaluated with the same
+piecewise-constant, first-order cell representation used for the rest of the baseline
+solver,
+\begin{equation}
+ \boxed{
+ \left.\frac{dN_{ij}}{d\tau}\right|_{\rm CH}
+ =V_{ij}S_{{\rm CH},ij}
+ }
+ \label{eq:discrete_ch_source}
+\end{equation}
+where $V_{ij}$ is given by Eq.~\eqref{eq:cellvolume}.  Therefore the discrete
+large-angle calculation is simply
+\begin{equation}
+ f_{ij}
+ \;\longrightarrow\;
+ \mathcal F_i=\Delta\xi\sum_j f_{ij}
+ \;\longrightarrow\;
+ S_{{\rm CH},ij}
+ \;\longrightarrow\;
+ \left.dN_{ij}/d\tau\right|_{\rm CH}.
+\end{equation}
+No additional physical approximation is introduced in Sec.~2.  Spatial accuracy of this
+first-order evaluation is established by refinement of the geometric $p$ and uniform
+$\xi$ meshes.
+For fixed physical parameters and a fixed mesh, Eqs.~\eqref{eq:discrete_primary_spectrum}--
+\eqref{eq:discrete_ch_source} define a time-independent linear mapping of the evolving
+cell contents.
+
+
+\paragraph{Exact discrete pitch-reduction factorization.}
+For the algebra used by the PETSc implementation it is convenient to introduce the radial
+cell phase volume
+\begin{equation}
+ V_i^{(p)}=\frac{2\pi}{3}
+ \left(p_{i+1/2}^3-p_{i-1/2}^3\right)
+\end{equation}
+and the radial particle content
+\begin{equation}
+ \boxed{
+ M_i(\tau)\equiv\sum_{j=1}^{N_\xi}N_{ij}(\tau)
+ =V_i^{(p)}\mathcal F_i(\tau).
+ }
+ \label{eq:ch_radial_mass}
+\end{equation}
+Let $R$ denote the fixed pitch-reduction map
+\begin{equation}
+ \bm M=R\bm N,
+ \qquad
+ (R\bm N)_i=\sum_{j=1}^{N_\xi}N_{ij}.
+ \label{eq:ch_reduction_matrix}
+\end{equation}
+For every active Chiu--Harvey target cell $q\equiv(i,j)$, let $k(q)$ denote the
+primary radial cell selected by Eq.~\eqref{eq:ch_primary_cell}.  All target geometry,
+knock-on factors, normalization factors, target-cell volume, and the factor
+$1/V_{k(q)}^{(p)}$ are time independent and may therefore be collected into a scalar
+$c_q$.  The discrete source then has the exact form
+\begin{equation}
+ \left.\frac{dN_q}{d\tau}\right|_{\rm CH}
+ =c_q M_{k(q)}.
+ \label{eq:ch_mass_scatter}
+\end{equation}
+Define the fixed scatter map $U$ by $(U\bm M)_q=c_qM_{k(q)}$ on active targets and
+zero otherwise.  The complete discrete Chiu--Harvey operator is therefore
+\begin{equation}
+ \boxed{L_{\rm CH}=UR.}
+ \label{eq:ch_UR_factorization}
+\end{equation}
+Equations~\eqref{eq:ch_radial_mass}--\eqref{eq:ch_UR_factorization} are not a new
+quadrature or a new physical approximation: they are an exact factorization of
+Eqs.~\eqref{eq:discrete_primary_spectrum}--\eqref{eq:discrete_ch_source}.  In particular,
+the source can be applied by one pitch reduction per radial shell followed by one scatter
+to each active target instead of repeating the same pitch sum separately for every target.
+The expanded and reduced source applications are required to agree to floating-point
+accuracy.
+
+\subsection{Semidiscrete system and discrete balance}
+
+Flatten the one-based cell indices with
+\begin{equation}
+ k(i,j)=(i-1)N_\xi+j,
+ \qquad k=1,\ldots,N_pN_\xi.
+ \label{eq:flattening}
+\end{equation}
+After discretizing every local differential term, let $L_0$ denote the time-independent
+finite-volume operator containing electric acceleration, the selected small-angle
+collision coefficients, synchrotron reaction, and all boundary fluxes.  The selected
+large-angle operator is
+\begin{equation}
+ L_{\rm LA}=\begin{cases}
+ 0, & \text{no large-angle gain},\\
+ U_{\rm CH}R_{\rm CH}, & \text{Chiu--Harvey}.
+ \end{cases}
+ \label{eq:large_angle_discrete_choices}
+\end{equation}
+The complete semidiscrete equation is
+\begin{equation}
+ \boxed{
+ L=L_0+L_{\rm LA},\qquad
+ \frac{d\bm N}{d\tau}=L\bm N.
+ }
+ \label{eq:semidiscrete}
+\end{equation}
+For standalone mode this is one fixed linear operator; no operator splitting is
+introduced.  In coupled mode the operator is rebuilt at each Newton iterate from
+the current bulk stage state, while its finite-volume sparsity pattern remains fixed.
+
+Summing the physical finite-volume equations cancels every shared interior conservative
+flux exactly.  Writing $\Phi_{\rm in}\ge0$ and $\Phi_{\rm out}\ge0$ for particle loss
+through the inner and outer radial boundaries, respectively, gives
+\begin{equation}
+ \boxed{
+ \frac{d}{d\tau}\bm 1^T\bm N
+ =-\Phi_{\rm in}-\Phi_{\rm out}+\bm 1^TL_{\rm LA}\bm N.
+ }
+ \label{eq:discrete_particle_balance}
+\end{equation}
+For the zero-flux production inner boundary $\Phi_{\rm in}=0$; it can be nonzero for the
+shifted absorbing boundary.  For Chiu--Harvey the production term is
+$\bm1^TU_{\rm CH}R_{\rm CH}\bm N$, and it vanishes when the gain is disabled.
+
+\subsection{Implicit time stepping and planned TR--BDF2 method}
+
+For fixed-step standalone mode, the normalized time grid is uniform,
+\begin{equation}
+ \tau^n=n\Delta\tau,\qquad n=0,1,\ldots,N_t.
+ \label{eq:uniform_time_grid}
+\end{equation}
+Adaptive mode instead accepts a sequence of positive trial steps $h_n$ with
+$\tau^{n+1}=\tau^n+h_n$.  The complete selected semidiscrete operator of
+Eq.~\eqref{eq:semidiscrete} is advanced implicitly.  No enabled physical term is
+lagged, split off, or treated explicitly.
+
+The current constant-parameter CPU prototype uses fixed-step fully implicit TR--BDF2
+with a shared factored stage matrix.  The electric-field coupled prototype still uses
+variable-step fully implicit BDF2 with a backward-Euler comparison solve.  The TR--BDF2
+method below is the target integrator for that coupled path as well.
+
+The two-stage TR--BDF2 method uses
+\begin{equation}
+ d=1-\frac{1}{\sqrt{2}},\qquad h=\Delta\tau
+ \quad\text{(or }h=h_n\text{ in adaptive mode)}.
+ \label{eq:trbdf2_parameter}
+\end{equation}
+For a fixed operator $L$, define the common stage matrix
+\begin{equation}
+ \mathcal A_d(h)=I-dhL.
+ \label{eq:trbdf2_stage_matrix}
+\end{equation}
+The first stage is the trapezoidal solution at the intermediate TR--BDF2 stage,
+\begin{equation}
+ \boxed{
+ \mathcal A_d(h)\bm N^\gamma
+ =\left(I+dhL\right)\bm N^n
+ =2\bm N^n-\mathcal A_d(h)\bm N^n.
+ }
+ \label{eq:trbdf2_stage1}
+\end{equation}
+The endpoint stage uses the same matrix,
+\begin{equation}
+ \boxed{
+ \mathcal A_d(h)\bm N^{n+1}
+ =\bm N^n+\frac{h}{2\sqrt{2}}
+   \left(L\bm N^n+L\bm N^\gamma\right).
+ }
+ \label{eq:trbdf2_stage2}
+\end{equation}
+Thus each accepted fixed-step advances through two sparse direct solves using the same
+stage matrix.  The constant-parameter CPU path now implements these equations directly.
+
+When adaptive stepping is enabled, the embedded error estimate solves the same stage
+matrix with
+\begin{equation}
+ \mathcal A_d(h)\bm e^{n+1}
+ =\bm N^n+h\left(
+ b_0L\bm N^n+b_1L\bm N^\gamma+b_2L\bm N^{n+1}
+ \right)-\bm N^{n+1},
+ \label{eq:trbdf2_error}
+\end{equation}
+where
+\begin{equation}
+ (b_0,b_1,b_2)=
+ (0.2154822031355755,\,0.6868867239266070,\,0.09763107293781750).
+ \label{eq:trbdf2_error_weights}
+\end{equation}
+The scaled norm of $\bm e^{n+1}$ controls acceptance and the next trial step.  If a
+trial step changes, the numerical matrix values are reassembled and the PETSc sparse
+direct solver is refactorized while its CSR topology is reused.
+
+With Chiu--Harvey enabled, introduce the radial auxiliary state
+$\bm M=R_{\rm CH}\bm N$.  The stage matrix is the exact augmented system
+\begin{equation}
+ \boxed{
+ \mathcal A_{d,\rm aug}(h)=
+ \begin{bmatrix}
+  I-dhL_0 & -dhU_{\rm CH}\\
+  -R_{\rm CH} & I
+ \end{bmatrix}.
+ }
+ \label{eq:trbdf2_augmented_matrix}
+\end{equation}
+The right-hand side is the corresponding physical TR--BDF2 stage right-hand side
+with a zero auxiliary block.  Eliminating $\bm M$ recovers
+$L=L_0+U_{\rm CH}R_{\rm CH}$ exactly.  The auxiliary constraint contains no time
+derivative, so its identity block is unchanged between stages.
+When Chiu--Harvey is disabled, the auxiliary state and constraint rows are omitted
+entirely; the PETSc system then contains only the $N_pN_\xi$ physical cell contents.
+
+In the planned coupled mode, each TR--BDF2 stage is one nonlinear system containing the kinetic
+cell state, any Chiu--Harvey auxiliary state, the bulk temperature, every charge-state
+population, the bulk current, and an explicit kinetic-current closure scalar.  The
+electric field is algebraically eliminated through Ohm's law.  Let
+\begin{equation}
+ \bm x=(\bm N,\bm M,T_e,\{n_{a,q}\},I_p,I_{\rm RE})^T,
+ \qquad
+ \bm F_{\rm stage}(\bm x)=\bm 0
+ \label{eq:coupled_stage_system}
+\end{equation}
+denote the assembled stage system, where $\bm M=R_{\rm CH}\bm N$ is present only
+for the augmented Chiu--Harvey formulation.  Newton solves
+\begin{equation}
+ \bm J_{\rm stage}(\bm x_k)\,\delta\bm x_k
+ =-\bm F_{\rm stage}(\bm x_k),\qquad
+ \bm x_{k+1}=\bm x_k+\alpha_k\delta\bm x_k,
+ \label{eq:coupled_newton_step}
+\end{equation}
+with analytic kinetic, kinetic--bulk, bulk--kinetic, and bulk Jacobian blocks.
+The scalar kinetic-current closure is intentionally left open pending the current-model
+decision described below.  Positivity damping is applied when required.  Newton first
+converges the TR stage, then the BDF2
+stage; only a converged pair is eligible for timestep error estimation and
+acceptance.
+
+\subsection{Sparse direct solution with PETSc}
+
+The local physical block always has the same finite-volume stencil.  Changing between
+the two small-angle collision models changes coefficient values but not the CSR topology.
+The Chiu--Harvey configuration adds the exact low-dimensional radial auxiliary system of
+Eq.~\eqref{eq:trbdf2_augmented_matrix}.
+
+For one standalone simulation, the direct-solve procedure is:
+\begin{enumerate}
+ \item construct the geometric-radial finite-volume grid and cell geometry;
+ \item project the prescribed initial distribution using Eq.~\eqref{eq:initial_projection};
+ \item evaluate the selected small-angle collision coefficients once;
+ \item if Chiu--Harvey is enabled, construct its fixed target geometry and the exact
+       reduction/scatter maps $R_{\rm CH}$ and $U_{\rm CH}$;
+ \item construct and validate the fixed CSR graph for the physical or augmented system;
+ \item assemble the implicit TR--BDF2 stage matrix for fixed-parameter mode, using
+       only the physical block when Chiu--Harvey is disabled;
+ \item perform one sparse symbolic analysis of that fixed graph;
+ \item numerically factor the stage matrix and solve the implicit stage;
+ \item in adaptive mode, reassemble and refactor numerical values when the trial
+       timestep changes while reusing the CSR topology;
+ \item in coupled mode, construct the monolithic stage CSR graph once, assemble the
+       analytic Newton Jacobian values at each iterate, and refactorize while reusing
+       the topology.
+\end{enumerate}
+Fixed-parameter mode uses two TR--BDF2 stages with a shared matrix.  The current
+electric-field adaptive prototype uses variable-step BDF2 with a backward-Euler
+comparison solve for its local error estimate.  Coefficient or timestep changes require
+numerical refactorization but not CSR symbolic reanalysis when topology remains unchanged.
+
+For Chiu--Harvey, the exact augmented graph contains the local physical stencil, one
+auxiliary-column coupling for each active target, and $N_p$ radial constraints
+$M_i-\sum_jN_{ij}=0$.  Its raw graph size is $O(N_pN_\xi)$ and avoids the quadratic
+pitch growth that would result from explicitly multiplying $U_{\rm CH}R_{\rm CH}$.
+
+The CPU implementation uses PETSc distributed AIJ matrices and vectors with FP64
+arithmetic.  CSR column indices, finite-volume slot maps, auxiliary couplings, and graph
+validation are constructed during setup.  PETSc's configured sparse direct solver
+performs numerical factorization and triangular solves.
+
+For any solved linear system $A\bm x=\bm b$, the relative residual
+\begin{equation}
+ r_{\rm lin}=\frac{\|A\bm x-\bm b\|_2}{\|\bm b\|_2}
+ \label{eq:linear_residual}
+\end{equation}
+is evaluated directly.  When the Chiu--Harvey augmented formulation is active, the
+constraint defect $\|\bm M-R_{\rm CH}\bm N\|$ is checked independently.
+
+\subsection{Discrete diagnostics and numerical qualification}
+
+The solver reports direct moments of the represented kinetic distribution.  The
+baseline current diagnostic is the total kinetic parallel current, not a
+threshold-defined runaway current.  Its units are current density
+$\mathrm{A\,m^{-2}}$; multiplying by the configured area gives total current
+$\mathrm{A}$.
+
+The normalized represented density is exactly
+\begin{equation}
+ \boxed{
+ \frac{n_F}{n_{\rm ref}}=\sum_{i=1}^{N_p}\sum_{j=1}^{N_\xi}N_{ij}
+ }
+ \label{eq:discrete_density}
+\end{equation}
+because $N_{ij}$ is the particle content in the normalized phase-space measure.
+
+The dimensional parallel current density corresponding to the piecewise-constant
+reconstruction is
+\begin{equation}
+ \boxed{
+ j_\parallel
+ =-e n_{\rm ref}c
+ \sum_{i=1}^{N_p}\sum_{j=1}^{N_\xi}
+ f_{ij}\,W_i^{(v)}W_j^{(\xi)}
+ }
+ \label{eq:discrete_current}
+\end{equation}
+with exact cell weights
+\begin{align}
+ W_i^{(v)}
+ &=2\pi\int_{p_{i-1/2}}^{p_{i+1/2}}
+       p^2\frac{p}{\sqrt{1+p^2}}\,dp
+ \nonumber\\
+ &=2\pi\left[
+       \frac{\gamma^3}{3}-\gamma
+       \right]_{p_{i-1/2}}^{p_{i+1/2}},
+ \qquad \gamma=\sqrt{1+p^2},
+ \label{eq:current_radial_weight}\\
+ W_j^{(\xi)}
+ &=\int_{\xi_{j-1/2}}^{\xi_{j+1/2}}\xi\,d\xi
+ =\frac{\xi_{j+1/2}^2-\xi_{j-1/2}^2}{2}.
+ \label{eq:current_pitch_weight}
+\end{align}
+Thus neither density nor total kinetic current requires an additional diagnostic
+quadrature.  A thresholded diagnostic uses the same weights with the indicator in
+Eq.~\eqref{eq:threshold_runaway_current}, evaluated on the discrete cell energy.
+The provisional CPU coupling uses that thresholded diagnostic in its bulk Ohm and
+induction equations; the full-moment alternative remains under review.  In the current
+prototype $P_m=P_{\min}$, so it is not an independent cutoff.
+
+\paragraph{Numerical refinement parameters.}
+Every selected physical configuration is qualified by independent refinement of
+\begin{equation}
+ \boxed{
+ N_p,\qquad N_\xi,\qquad p_{\max},\qquad
+ q_{\rm init},\qquad \Delta\tau
+ }
+ \label{eq:convergence_parameters}
+\end{equation}
+with $q_{\rm coll}$ added as an independent convergence parameter only for the
+finite-temperature relativistic coefficient evaluation.  The fully-relativistic
+asymptotically matched coefficients are analytic and use no collision quadrature.
+
+Spatial refinement is performed on the current geometric-radial and uniform-pitch grid
+family of Eqs.~\eqref{eq:geometric_p_grid}--\eqref{eq:current_xi_grid}.  Radial and
+pitch resolution are tested independently by increasing $N_p$ and $N_\xi$.  Domain-size
+convergence is a separate test: $p_{\max}$ is increased while the radial resolution is
+also monitored, so that the physical domain and local momentum resolution are not
+confounded.  The accepted $p_{\max}$ is
+large enough that the represented distribution and reported moments are insensitive to
+a further increase of the outer boundary over the simulated time interval.
+
+For the finite-temperature model, $q_{\rm coll}$ is increased until the collision
+coefficients are unchanged to the accuracy required by the mesh-converged kinetic
+solution.  The fully-relativistic asymptotically matched model instead requires
+asymptotic checks of its analytic direct evaluation.  In all configurations, $q_{\rm init}$ is increased
+until the projected initial cell contents in Eq.~\eqref{eq:initial_projection} are
+converged.  These checks are performed independently of mesh refinement.
+
+\paragraph{Required numerical qualification tests.}
+These tests establish that each implemented configuration discretizes its Section-1
+operator correctly.  They are distinct from external literature benchmarks, which test
+whether the resulting physical model reproduces established kinetic results.
+
+\begin{enumerate}
+ \item \textbf{Small-angle coefficient evaluation.}
+       For the finite-temperature model, the direct scaled formulas and low-$p$ Taylor
+       formulas must agree in an overlap interval and increasing $q_{\rm coll}$ must
+       leave the coefficients unchanged.  For the fully-relativistic asymptotically matched model,
+       Eqs.~\eqref{eq:matched_numeric_cf}--\eqref{eq:matched_numeric_nud} must reproduce the
+       Section-1 operator in Eq.~\eqref{eq:matched_tp_operator} after coordinate
+       transformation; the direct and small-$x$ evaluations of $\Psi$ must overlap, and
+       the non-relativistic and relativistic asymptotic limits must be recovered.
+       For both base models, the energy-dependent Coulomb-logarithm layer must satisfy
+       Eqs.~\eqref{eq:common_log_numeric_cf}--\eqref{eq:common_log_numeric_nud}; setting
+       $R_{ee}=R_{ei}=1$ must recover the thermal-log base exactly, and $C_A$ must remain
+       unchanged.  Fully stripped ions must set only the partial-screening terms to zero,
+       leaving the common Coulomb-logarithm corrections active.  With bound electrons
+       present, the additional changes in $C_F$ and $\nu_D$ must equal
+       Eqs.~\eqref{eq:screening_numeric_cf} and \eqref{eq:screening_numeric_nud},
+       respectively, again with $C_A$ unchanged.
+
+ \item \textbf{Finite-volume balance.}
+       For arbitrary test states, summing the semidiscrete physical-cell equations must
+       reproduce Eq.~\eqref{eq:discrete_particle_balance} to floating-point accuracy.
+       Every interior face contribution must cancel pairwise between adjacent cells.
+
+ \item \textbf{Collision equilibrium.}
+       With electric field, synchrotron radiation, and large-angle gain removed, the
+       appropriate Maxwell--J{\"u}ttner equilibrium at the prescribed background
+       temperature must approach a stationary discrete solution as the mesh and
+       any applicable coefficient quadrature are refined.  Exact preservation is not
+       required from the first-order spatial scheme; the equilibrium defect must converge
+       to zero.
+
+ \item \textbf{Spatial convergence of the kinetic equation.}
+       Smooth verification problems must recover first-order asymptotic convergence with
+       respect to the first-order drift discretization as the geometric radial spacing
+       and $\Delta\xi$ are independently reduced.  Production configurations must then
+       be continued to finer meshes until
+       the full distribution and reported moments are insensitive to further refinement.
+
+ \item \textbf{Chiu--Harvey discretization, when selected.}
+       For a prescribed smooth two-dimensional distribution, the discrete primary pitch
+       integral and the resulting cell-centered source must converge to the Section-1
+       Chiu--Harvey expressions under independent radial and $\Delta\xi$ refinement.
+       The test includes the finite-energy primary root, kinematic support, and fixed
+       large-angle cutoff.
+
+ \item \textbf{Chiu--Harvey algebraic factorization, when selected.}
+       On a fixed mesh and state, the pitch-reduction/scatter application must agree with
+       the explicitly expanded $N_\xi$-term source sum to floating-point accuracy.  The
+       augmented TR--BDF2 stages must reproduce the physical solution of the expanded
+       stages to the accuracy permitted by the sparse residual, and
+       $\bm M=R_{\rm CH}\bm N$ must hold to floating-point accuracy.
+
+ \item \textbf{Outer-domain convergence.}
+       At fixed local radial resolution and $\Delta\xi$, increasing $p_{\max}$ must leave the solution
+       on the original momentum interval and the reported moments unchanged to the
+       required accuracy.
+
+ \item \textbf{Temporal convergence.}
+       With a spatially converged mesh, reducing $\Delta\tau$ must recover second-order
+       convergence of the fully implicit TR--BDF2 evolution over a fixed physical
+       interval.  Adaptive runs must also demonstrate error-controlled step acceptance
+       and stable convergence under timestep refinement.
+
+ \item \textbf{Sparse direct solve.}
+       Every TR--BDF2 stage solve and adaptive error-estimate solve must satisfy
+       Eq.~\eqref{eq:linear_residual}; the residual must remain small compared with the
+       demonstrated spatial and temporal discretization errors.  Any active auxiliary
+       constraint must satisfy its separate defect check.
+\end{enumerate}
+
+Unresolved coarse meshes may be used for algebraic, indexing, and implementation tests,
+but they are not evidence of physical convergence.  The numerical strategy is deliberately to use a simple first-order finite-volume
+discretization on a sufficiently resolved CPU mesh and to demonstrate convergence
+directly for each selected physical configuration.
+
+
+%===============================================================================
+\section{Bulk-plasma coupling: current prototype and target}
+\label{sec:bulk_coupling}
+
+Standalone mode advances the kinetic distribution using a prescribed, constant plasma
+state.  Coupled operation uses the analytic-Newton prototype with PETSc linear solves
+and host-side bulk residual evaluation.
+
+\subsection{Bulk state and collisional-radiative equations}
+
+For each coupled atomic species $a$, let $Z_a$ be its atomic number and let
+$n_{a,q}$ denote the density in charge state $q$, with $q=0,\ldots,Z_a$.  The total
+nuclei density evolves through the neutral injection source,
+\begin{equation}
+ \sum_{q=0}^{Z_a} n_{a,q}=n_{a,\rm tot}(t),
+ \qquad
+ n_{a,\rm tot}(t)=n_{a,\rm base}
+ +\Delta n_a\int_0^t
+ \frac{\mathbf 1_{(t_a,t_a+\Delta t_a)}(s)}{\Delta t_a}\,ds.
+\label{eq:bulk_nuclei_conservation}
+\end{equation}
+The implemented initial state places each species in its configured initial charge state
+$q_{a,0}$,
+\begin{equation}
+ n_{a,q}(0)=n_{a,\rm tot}(0)\,\delta_{q,q_{a,0}}.
+ \label{eq:bulk_initial_charge_state}
+\end{equation}
+The free-electron density and effective charge are computed from the charge-state
+populations,
+\begin{align}
+ n_e &= \sum_a\sum_{q=0}^{Z_a}q\,n_{a,q},
+ & Z_{\rm eff} &=
+ \frac{\displaystyle\sum_a\sum_{q=0}^{Z_a}q^2 n_{a,q}}{n_e}.
+ \label{eq:bulk_electron_density_zeff}
+\end{align}
+Thus a background deuterium plasma with $n_e=10^{20}\,\mathrm{m}^{-3}$ is represented
+by a hydrogen OpenADAS bundle mapped to deuterium and a fully stripped $q=1$ population;
+additional D, Ne, or Ar populations add their own free electrons through the same equation.
+The cold target density used by the large-angle source is
+\begin{equation}
+ n_t=n_e+\sum_a\sum_{q=0}^{Z_a}(Z_a-q)n_{a,q},
+ \label{eq:bulk_target_density}
+\end{equation}
+unless standalone input supplies an explicit $n_t$ override.
+
+OpenADAS ADF11 SCD and ACD coefficients are evaluated at the current $(T_e,n_e)$ in native
+$\mathrm{cm^3\,s^{-1}}$ units.  With the ADF11 charge-block convention used by the code,
+define
+\begin{align}
+ S_{a,q}(T_e,n_e) &= \mathrm{SCD}_{a,q+1}(T_e,n_e),
+ &&q=0,\ldots,Z_a-1,\\
+ \alpha_{a,q}(T_e,n_e) &= \mathrm{ACD}_{a,q}(T_e,n_e),
+ &&q=1,\ldots,Z_a.
+ \label{eq:bulk_adas_rates}
+\end{align}
+The ECD table supplies a charge-state mean ionisation potential
+$I^{\rm ECD}_{a,q}(T_e,n_e)$ in eV.  The reader interpolates ECD values directly in
+the tabulated values, rather than in logarithmic form.  When explicit state-resolved
+excitation energies are absent, the coupled kinetic driver uses ECD values for the
+$I_{a,q}$ inputs in Eq.~\eqref{eq:physical_h}.  This requires verifying that the ECD
+definition matches the Hesslow mean-excitation definition for the selected data set.
+The ADF11 block $Z1=q+1$ supplies the value for charge state $q$; the bare state has
+no next ionisation transition and uses zero.
+ECD values are not successive ionization energies $I_{a,r}$ in
+Eq.~\eqref{eq:bulk_energies}; the current bulk energy ledger keeps those transition
+energies as explicit species inputs.
+The collisional-radiative population equations are
+\begin{equation}
+ \frac{d n_{a,q}}{dt}
+ = n_e\left[S_{a,q-1}n_{a,q-1}+\alpha_{a,q+1}n_{a,q+1}
+ -(S_{a,q}+\alpha_{a,q})n_{a,q}\right]
+ +\mathcal I_{a,q},
+ \label{eq:bulk_charge_state_rhs}
+\end{equation}
+where terms with invalid charge indices are zero.  In the nonlinear stage system, one
+redundant bare-state equation per species is replaced by the exact constraint
+Eq.~\eqref{eq:bulk_nuclei_conservation}; no post-root nuclei projection is applied.
+The factors $n_e$ are converted to
+$\mathrm{cm^{-3}}$ before multiplying the native OpenADAS coefficients.  With no injection,
+the collisional-radiative terms conserve Eq.~\eqref{eq:bulk_nuclei_conservation}; with
+injection, the source in Eq.~\eqref{eq:bulk_neutral_injection_source} sets the changing
+species total.
+
+The OpenADAS PLT and PRB coefficients provide line-plus-continuum and recombination-plus-
+bremsstrahlung power.  In native $\mathrm{W\,cm^3}$ units, the implemented radiated power
+density is
+\begin{equation}
+ P_{\rm rad}=10^{-6}n_e\sum_a\sum_{q=0}^{Z_a-1}
+ n_{a,q}\left[\mathrm{PLT}_{a,q+1}(T_e,n_e)+\mathrm{PRB}_{a,q+1}(T_e,n_e)\right].
+ \label{eq:bulk_radiated_power}
+\end{equation}
+The ADF11 tables use bilinear interpolation in
+$x=\log_{10}(T_e/\mathrm{eV})$ and $y=\log_{10}(n_e/\mathrm{cm^{-3}})$, with the
+coefficient interpolated in logarithmic form:
+\begin{align}
+ \log_{10}K(x,y)&=(1-f_x)(1-f_y)\log_{10}K_{00}
+ +(1-f_x)f_y\log_{10}K_{01}\\
+ &\quad+f_x(1-f_y)\log_{10}K_{10}+f_xf_y\log_{10}K_{11},\\
+ K(x,y)&=10^{\log_{10}K(x,y)}.
+ \label{eq:bulk_adas_interpolation}
+\end{align}
+Here $f_x$ and $f_y$ are fractional positions inside the enclosing native grid cell.
+Interpolation occurs only inside the native temperature and density rectangle.  Missing
+tables or out-of-range values are run-time errors.
+The analytic Newton Jacobian differentiates this interpolation rule with respect to
+$T_e$ and $n_e$.  ECD uses the same bilinear grid coordinates but interpolates the
+tabulated mean-ionisation-potential values directly, with derivatives of that direct
+interpolation rule.
+
+\subsection{Bulk energy, resistivity, and current equations}
+
+The implemented bulk energy state contains electron thermal energy and ionization energy,
+\begin{align}
+ U_e &= \frac32 e n_e T_e,\\
+ U_{\rm at} &= e\sum_a\sum_{q=0}^{Z_a}E_{a,q}n_{a,q},
+ & E_{a,q}&=\sum_{r=1}^{q}I_{a,r},\qquad E_{a,0}=0.
+ \label{eq:bulk_energies}
+\end{align}
+Here $T_e$ is stored in electron-volts, $I_{a,r}$ is the ionization energy for transition
+$r-1\to r$, and $eT_e$ converts electron-volts to joules.  The temperature equation is
+\begin{equation}
+ \frac{dT_e}{dt}
+ =\frac{P_\Omega-P_{\rm rad}-dU_{\rm at}/dt
+ -(3/2)eT_e\,dn_e/dt}{(3/2)e n_e}.
+ \label{eq:bulk_temperature_rhs}
+\end{equation}
+The population equations determine the two derivatives in this expression,
+\begin{align}
+ \frac{dn_e}{dt}&=\sum_a\sum_{q=0}^{Z_a}q\frac{dn_{a,q}}{dt},\\
+ \frac{dU_{\rm at}}{dt}&=e\sum_a\sum_{q=0}^{Z_a}E_{a,q}\frac{dn_{a,q}}{dt}.
+ \label{eq:bulk_energy_derivatives}
+\end{align}
+The code includes no separate ion-temperature or transport-energy equation.
+
+The thermal Coulomb logarithm and Spitzer-like resistivity used by the bulk model are
+\begin{align}
+ \ln\Lambda_0&=14.9-\frac12\ln\left(\frac{n_e}{10^{20}\,\mathrm{m}^{-3}}\right)
+ +\ln\left(\frac{T_e}{10^3\,\mathrm{eV}}\right),\\
+ \eta&=1.65\times10^{-9}\,\frac{Z_{\rm eff}\ln\Lambda_0}
+ {(T_e/10^3\,\mathrm{eV})^{3/2}}\;\Omega\,\mathrm{m}.
+ \label{eq:bulk_resistivity}
+\end{align}
+Let $I_p$ be the bulk current, $A$ the configured cross-sectional area, $R_0$ the
+major radius, $L$ the lumped inductance, and $V_{\rm app}$ the applied voltage.  For
+the provisional CPU closure, $j_{\rm RE}^{(\kappa)}$ is the thresholded non-thermal
+kinetic current density from Eq.~\eqref{eq:threshold_runaway_current}.  The Ohm and
+induction equations are
+\begin{align}
+ j_p&=\frac{I_p}{A},
+ &I_{\rm RE}&=A j_{\rm RE}^{(\kappa)},\\
+ E_\parallel&=\eta\left(j_p-j_{\rm RE}^{(\kappa)}\right),
+ &P_\Omega&=E_\parallel j_p,\\
+ \frac{dI_p}{dt}&=\frac{V_{\rm app}-R_p(I_p-I_{\rm RE})}{L},
+ &R_p&=\frac{2\pi R_0\eta}{A}.
+ \label{eq:bulk_ohm_induction}
+\end{align}
+The factor $A$ is used only to convert the current density to the lumped current
+needed by the induction equation; $j_{\rm RE}^{(\kappa)}$ is the quantity used in
+Ohm's law.  Whether this thresholded closure or the full $j_\parallel$ is the final
+physical coupling choice remains open for a later qualification study.  The configured geometry is
+\begin{equation}
+ R_0=6\,\mathrm{m},\qquad a=2\,\mathrm{m},\qquad
+ A=\pi a^2,\qquad L=\mu_0R_0.
+ \label{eq:bulk_geometry}
+\end{equation}
+The magnetic field $B_T$ remains prescribed and is not exchanged with the bulk state.
+
+The implemented homogeneous material-injection source is neutral and finite-duration.
+For species $a$, with injected amount $\Delta n_a$, start time $t_a$, and duration
+$\Delta t_a$, it is
+\begin{equation}
+ \mathcal I_{a,q}(t)=
+ \frac{\Delta n_a}{\Delta t_a}
+ \mathbf 1_{(t_a,t_a+\Delta t_a)}(t)\,\delta_{q0}.
+ \label{eq:bulk_neutral_injection_source}
+\end{equation}
+The source is spatially homogeneous because the model has no spatial coordinate.  Its
+particle, free-electron, and atomic-energy balances are
+\begin{equation}
+ \sum_q\mathcal I_{a,q}=\frac{dn_{a,\rm tot}}{dt},
+ \qquad
+ \left.\frac{dn_e}{dt}\right|_{\rm inj}=\sum_{a,q}q\mathcal I_{a,q},
+ \qquad
+ \left.\frac{dU_{\rm at}}{dt}\right|_{\rm inj}
+ =e\sum_{a,q}E_{a,q}\mathcal I_{a,q}.
+ \label{eq:bulk_injection_sources}
+\end{equation}
+The single-temperature model assigns no separate kinetic-energy reservoir to injected
+neutrals.  Consequently $\mathcal I_{a,0}$ contributes no direct injection-energy term;
+electron energy changes only through the existing ionization-energy and radiation terms.
+
+\subsection{Bulk TR--BDF2 stages and kinetic exchange}
+
+Write the bulk state as
+\begin{equation}
+ \bm y=(T_e,n_{1,0},\ldots,n_{a,q},\ldots,I_p)^T,
+ \qquad \frac{d\bm y}{dt}=\bm f(\bm y,t;I_{\rm RE}).
+ \label{eq:bulk_state_rhs}
+\end{equation}
+For each attempted step of size $h$, the host model solves the same TR--BDF2 stages as
+the kinetic model, with $d=1-1/\sqrt2$ and $w=\sqrt2/4$,
+\begin{align}
+ \bm y^\gamma-\bm y^n
+ &=dh\left[\bm f(\bm y^n,t_n;I_{\rm RE}^n)
+ +\bm f(\bm y^\gamma,t_n+dh;I_{\rm RE}^\gamma)\right],\\
+ \bm y^{n+1}-\bm y^n
+ &=dh\,\bm f(\bm y^{n+1},t_n+h;I_{\rm RE}^{n+1})
+ +hw\left[\bm f(\bm y^n,t_n;I_{\rm RE}^n)
+ +\bm f(\bm y^\gamma,t_n+dh;I_{\rm RE}^\gamma)\right].
+ \label{eq:bulk_trbdf2}
+\end{align}
+The monolithic driver solves the coupled kinetic and bulk stage equations together.
+The provisional kinetic-current closure supplies $I_{\rm RE}=A j_{\rm RE}^{(\kappa)}$
+from the non-thermal discrete moment.  Newton will converge the TR stage first and the
+BDF2 stage second once TR--BDF2 is implemented; only then should the driver evaluate
+the adaptive error estimator and accept the timestep.
+
+At each kinetic stage, the bulk state maps to kinetic coefficients through
+\begin{align}
+ T_e^{\rm kin}&=T_e, & n_e^{\rm kin}&=n_e,
+ &E_\parallel^{\rm kin}&=\eta\left(\frac{I_p-I_{\rm RE}}{A}\right),\\
+ Z_{0a}^{\rm kin}&=0, & n_{a,q}^{\rm kin}&=n_{a,q},
+ & (I_{a,q}^{\rm kin},\bar a_{a,q}^{\rm kin})&=(I_{a,q},\bar a_{a,q}).
+ \label{eq:bulk_to_kinetic_mapping}
+\end{align}
+For a fully stripped species with no bound-electron correction, the driver instead passes
+$Z_{0a}^{\rm kin}=Z_a$ and its current total density.  The kinetic driver rebuilds
+state-resolved collision coefficients from these values and retains the prescribed $B_T$.
+The production stage convergence test uses separate scaled nonlinear residual and
+Newton-update norms.  It does not use the PETSc linear residual as a nonlinear
+stopping criterion.  The bulk scaling uses $s_T$, $s_n$, and $s_I$ for temperature,
+charge-state populations, and current; the kinetic rows use a configured kinetic
+residual scale.  Each species also satisfies Eq.~\eqref{eq:bulk_nuclei_conservation}
+inside the Newton residual.  Rejected adaptive trials restore the last accepted
+kinetic and bulk states exactly before reducing the trial step.
+
+The legacy fixed-point residual used by the Picard comparison driver is retained only
+for regression studies and is not the production coupling equation.
+
+The implemented coupling contract is:
+\begin{itemize}
+  \item the host bulk state contains electron temperature, charge-state populations for
+        every coupled species, and total current; electron density and parallel electric
+        field are derived by the bulk model.  The magnetic field remains the prescribed
+        $B_T$ configuration parameter and is not currently exchanged;
+  \item each configured injected species receives the homogeneous neutral source in
+        Eq.~\eqref{eq:bulk_neutral_injection_source}; the source changes species nuclei
+        density but adds no separate injection-energy state;
+  \item the planned coupled timestep solves its TR and BDF2 stages with the monolithic
+        analytic-Newton system in Eq.~\eqref{eq:coupled_stage_system}; each Newton
+        iteration updates numerical CSR values and uses PETSc factorization or
+        refactorization while retaining the fixed topology;
+  \item the bulk equations include full charge-state populations, neutral finite-duration
+        injection, nuclei-total constraints, state-resolved quasineutrality, energy,
+        Ohm, and lumped-induction terms;
+  \item particle/current, bulk-energy, collisional-radiative, Ohmic, and lumped-induction
+        terms are evaluated by the implemented host bulk model and reported through
+        stage diagnostics; and
+  \item local OpenADAS ADF11 bundles and authoritative state-resolved excitation and
+        screening data are required for each coupled species.  The maintained Newton
+        report records the input TOML, stage diagnostics, bulk state, charge populations,
+        current, timing, and memory; the standalone output path additionally provides
+        restart/provenance payloads.
+\end{itemize}
+
+The analytic-Newton path is the intended coupled implementation.  Qualification records
+must include nuclei-total conservation, analytic directional derivatives, Newton/Picard
+equation equivalence, adaptive rejection/retry, topology reuse, and restart equivalence.
+The final choice between the thresholded $j_{\rm RE}^{(\kappa)}$ closure and the full
+$j_\parallel$ closure remains an explicit physics decision; it must not be hidden in a
+diagnostic or inferred from the lumped current.
+
+\begin{thebibliography}{99}
+
+\bibitem{ConnorHastie1975}
+J.~W. Connor and R.~J. Hastie,
+``Relativistic limitations on runaway electrons,''
+\emph{Nucl. Fusion} \textbf{15}, 415 (1975).
+
+\bibitem{BraamsKarney1989}
+B.~J. Braams and C.~F.~F. Karney,
+``Conductivity of a relativistic plasma,''
+\emph{Phys. Fluids B} \textbf{1}, 1355 (1989).
+
+\bibitem{PikeRose2014}
+O.~J. Pike and S.~J. Rose,
+``Dynamical friction in a relativistic plasma,''
+\emph{Phys. Rev. E} \textbf{89}, 053107 (2014).
+
+\bibitem{Hesslow2017Screening}
+L.~Hesslow, O.~Embr\'eus, A.~Stahl, T.~C. DuBois, G.~Papp,
+S.~L. Newton, and T.~F{\"u}l{\"o}p,
+``Effect of partially screened nuclei on fast-electron dynamics,''
+\emph{Phys. Rev. Lett.} \textbf{118}, 255001 (2017).
+
+\bibitem{Hesslow2018Collision}
+L.~Hesslow, O.~Embr\'eus, M.~Hoppe, T.~C. DuBois, G.~Papp,
+M.~Rahm, and T.~F{\"u}l{\"o}p,
+``Generalized collision operator for fast electrons interacting with partially ionized impurities,''
+\emph{J. Plasma Phys.} \textbf{84}, 905840605 (2018).
+
+\bibitem{Andersson2001}
+F.~Andersson, P.~Helander, and L.-G.~Eriksson,
+``Damping of relativistic electron beams by synchrotron radiation,''
+\emph{Phys. Plasmas} \textbf{8}, 5221 (2001).
+
+\bibitem{Stahl2016}
+A.~Stahl, O.~Embr{\'e}us, G.~Papp, M.~Landreman, and T.~F{\"u}l{\"o}p,
+``Kinetic modelling of runaway electrons in dynamic scenarios,''
+\emph{Nucl. Fusion} \textbf{56}, 112009 (2016).
+
+\bibitem{Moller1932}
+C.~M{\o}ller,
+``Zur Theorie des Durchgangs schneller Elektronen durch Materie,''
+\emph{Ann. Phys.} \textbf{406}, 531 (1932).
+
+\bibitem{Chiu1998}
+S.~C. Chiu, M.~N. Rosenbluth, R.~W. Harvey, and V.~S. Chan,
+\emph{Nucl. Fusion} \textbf{38}, 1711 (1998).
+
+\bibitem{Harvey2000}
+R.~W. Harvey, V.~S. Chan, S.~C. Chiu, T.~E. Evans,
+M.~N. Rosenbluth, and D.~G. Whyte,
+\emph{Phys. Plasmas} \textbf{7}, 4590 (2000).
+
+
+\end{thebibliography}
+
+\end{document}

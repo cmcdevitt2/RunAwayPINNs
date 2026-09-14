@@ -6,17 +6,19 @@ data/
 outputs/
 logs/
 models/
+runs/
 backup/
 *.npz
 *.png
 
 # Local environments and editor state
 .venv/
+.petsc-venv/
+.petsc-cpu-venv/
 .env
 .vscode/
 .idea/
 
 # Retained legacy material; not part of the committed solver/PINN package
-configs/
 kinetic_model_reorganized_v15_4_fv_assisted_pinn.tex
 runaway_0d2p_warp_cudss_gpu_r7_5.py

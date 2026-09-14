@@ -1,171 +1,112 @@
-# HiPerGator B200 workflow
+# HiPerGator GPU workflow
 
-This page contains HiPerGator-only resource and module guidance. It does not
-apply to NERSC Perlmutter. Use [`PERLMUTTER.md`](PERLMUTTER.md) for Perlmutter
-A100 jobs. Python solver code remains cluster-agnostic.
+This page contains only HiPerGator resource guidance. The Python workflow is
+the same config-driven workflow described in the root `README.md`; resource
+syntax and environment modules are cluster-specific.
 
-Install shared dependencies from [`DEPENDENCIES.md`](DEPENDENCIES.md). Use
-direct VCS installation for the SSBFGS Optimistix branch; do not keep an
-Optimistix source repository as an environment dependency.
+## Environment and resources
 
-## Login node and environment
-
-Use HiPerGator login nodes for editing, repository inspection, small syntax or
-TOML checks, environment installation, and job submission. Run Warp, JAX,
-cuDSS, FV, and PINN workloads only through Slurm.
-
-From this directory, use the project environment or a validated replacement:
-
-```bash
-cd /path/to/DeepRunAway/SlabRpfPinn
-module spider python
-module spider cuda
-module spider nvmath
-module spider cudss
-source ../.venv/bin/activate
-```
-
-Select Python/CUDA modules supported by HiPerGator at submission time. Do not
-copy Perlmutter `module purge`, CUDA 13, or A100 assumptions without checking
-the HiPerGator driver and module stack. Follow the CUDA profile in
-[`DEPENDENCIES.md`](DEPENDENCIES.md) that matches `nvidia-smi`.
-
-## B200 resource request
-
-HiPerGator B200 jobs require site-specific account and QOS values. Confirm
-current names with `sinfo`; do not guess account or QOS:
+Use HiPerGator login nodes for editing and submission. Run FV generation and
+model training through Slurm. Confirm the current account, QOS, partition,
+GPU type, and Python/CUDA modules with the site scheduler before submitting.
 
 ```bash
 sinfo
-sbatch --account=<HIPERGATOR_ACCOUNT> --qos=<HIPERGATOR_QOS> \
-  hipergator_b200.sbatch
+module spider python
+module spider cuda
 ```
 
-For ordinary one-GPU studies, retain 28 total host threads:
+Example placeholder allocation:
 
 ```bash
-export OMP_NUM_THREADS=28
-export MKL_NUM_THREADS=28
-export OPENBLAS_NUM_THREADS=28
-export NUMEXPR_NUM_THREADS=28
+salloc --nodes=1 --ntasks=1 --gpus-per-task=4 \
+  --cpus-per-task=64 --account=<ACCOUNT> --qos=<QOS> --time=<HH:MM:SS>
 ```
 
-Run one serial batch job for each production workflow. Do not submit one job
-per parameter case.
+Inside the allocation, activate the validated project environment and disable
+JAX preallocation:
 
-## Direct FV or PINN batch template
+```bash
+cd /path/to/DeepRunAway/SlabRpfPinn
+source /path/to/validated/environment/bin/activate
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
+export MKL_NUM_THREADS="$OMP_NUM_THREADS"
+export OPENBLAS_NUM_THREADS="$OMP_NUM_THREADS"
+export NUMEXPR_NUM_THREADS="$OMP_NUM_THREADS"
+python -c 'import jax; print(jax.default_backend()); print(jax.devices())'
+```
 
-Save this template as `hipergator_b200.sbatch` in an approved persistent
-project/scratch directory, replace
-the account, QOS, and time placeholders, then submit it. Do not save a script
-under `/tmp` or use temporary directories for inputs or outputs.
+Use the CUDA/JAX package versions validated for the allocated GPU. Do not
+assume Perlmutter modules or GPU names are portable to HiPerGator.
+
+## Config-driven workflow
+
+Edit:
+
+- `run_configs/fv_dataset.json` for CPU FV generation;
+- `run_configs/train.json` for model mode, architecture, losses, and outputs;
+- `run_configs/validate_model.json` for validation and plots.
+
+Then run the stages without CLI arguments:
+
+```bash
+python generate_fv_dataset.py
+python train_model.py
+python validate_model.py
+```
+
+For a batch run, place the same environment setup in a site-specific Slurm
+wrapper and submit it with `sbatch`:
 
 ```bash
 #!/usr/bin/env bash
-#SBATCH --job-name=slab-rpf-hpg
-#SBATCH --account=<HIPERGATOR_ACCOUNT>
-#SBATCH --qos=<HIPERGATOR_QOS>
-#SBATCH --partition=hpg-b200
-#SBATCH --constraint=b200
-#SBATCH --gres=gpu:b200:1
+#SBATCH --job-name=slab-rpf-train
+#SBATCH --account=<ACCOUNT>
+#SBATCH --qos=<QOS>
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=28
-#SBATCH --mem=128G
+#SBATCH --gpus-per-node=4
+#SBATCH --cpus-per-task=64
 #SBATCH --time=<HH:MM:SS>
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
 
 set -euo pipefail
 cd "$SLURM_SUBMIT_DIR"
-source ../.venv/bin/activate
-
-export PYTHONUNBUFFERED=1
+source /path/to/validated/environment/bin/activate
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
-export OMP_NUM_THREADS=28
-export MKL_NUM_THREADS=28
-export OPENBLAS_NUM_THREADS=28
-export NUMEXPR_NUM_THREADS=28
-
-gpu_name="$(nvidia-smi --query-gpu=name --format=csv,noheader | sed -n '1p')"
-if [[ "$gpu_name" != *"B200"* ]]; then
-    echo "HiPerGator B200 allocation required, got: $gpu_name" >&2
-    exit 1
-fi
-
-python - <<'PY'
-import importlib.metadata as metadata
-import jax
-import nvmath
-import warp
-from nvmath.bindings import cudss
-
-print("JAX:", metadata.version("jax"), jax.default_backend(), jax.devices())
-print("Warp:", metadata.version("warp-lang"), warp.get_devices())
-print("nvmath-python:", metadata.version("nvmath-python"))
-for package_name in ("nvidia-cudss-cu13", "nvidia-cudss-cu12"):
-    try:
-        print("cuDSS package:", package_name, metadata.version(package_name))
-        break
-    except metadata.PackageNotFoundError:
-        pass
-else:
-    raise SystemExit("cuDSS runtime package required")
-if jax.default_backend() != "gpu":
-    raise SystemExit("JAX GPU backend required")
-if not any(getattr(d, "is_cuda", False) for d in warp.get_devices()):
-    raise SystemExit("Warp CUDA device required")
-major = cudss.get_property(nvmath.LibraryPropertyType.MAJOR_VERSION)
-minor = cudss.get_property(nvmath.LibraryPropertyType.MINOR_VERSION)
-if (major, minor) != (0, 8):
-    raise SystemExit(f"cuDSS 0.8 required, got {major}.{minor}")
-PY
-
-MODE="${MODE:-fv}"
-CONFIG="${CONFIG:-adjoint_fv_solver.toml}"
-case "$MODE" in
-    fv)       PROGRAM=(adjoint_fv_solver.py) ;;
-    pinn)     PROGRAM=(pinn_training.py) ;;
-    *)        echo "MODE must be fv or pinn" >&2; exit 2 ;;
-esac
-srun --ntasks=1 --cpus-per-task=28 --gpus-per-task=1 \
-    --cpu-bind=cores python "${PROGRAM[@]}" --config "$CONFIG"
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS="$SLURM_CPUS_PER_TASK"
+python train_model.py
 ```
-
-Create log directories before submission because Slurm opens output paths
-before executing the script:
 
 ```bash
-mkdir -p logs outputs
-MODE=fv CONFIG=adjoint_fv_solver.toml sbatch hpg_b200.sbatch
-MODE=pinn CONFIG=pinn_training_smoke.toml sbatch hpg_b200.sbatch
+mkdir -p logs
+sbatch train_model.sbatch
 ```
 
-## Interactive smoke test
+The root driver launches its own one-process-per-node `srun` step when the
+allocation spans multiple nodes. Do not add a second competing multi-node
+launcher around it.
 
-Use HiPerGator interactive GPU mechanism only if current scheduler policy
-permits it. Request one B200, then run same preflight and persistent
-`pinn_training_smoke.toml` configuration with `srun`. Keep output in
-`outputs/`, `logs/`, or approved `$SCRATCH`/project storage.
+The FV stage uses CPUs. Data/DeepONet and SOAP physics training can use one
+synchronized JAX process per node when launched from a multi-node allocation.
+For multi-node physics training, SSBroyden runs on rank 0 and broadcasts the
+refined parameters.
 
-## Monitoring and results
+Each stage writes durable artifacts and a manifest. Use new run directories
+for new dataset, training, or validation runs; existing completed runs are
+protected from overwrite.
+
+## Monitoring
 
 ```bash
 squeue -u "$USER"
-squeue -j <JOBID>
-tail -f logs/<job-name>-<JOBID>.out
 sacct -j <JOBID> \
   --format=JobID,JobName,Partition,Account,QOS,AllocTRES,State,ExitCode,Elapsed,MaxRSS
 ```
 
-Record job ID, effective account/QOS/partition, GPU name, driver, Python
-package versions, Git commit, TOML, residuals, probability bounds, and peak
-memory. Retain stdout/stderr with outputs. Never use `/tmp`, `$TMPDIR`,
-`mktemp`, or node-local temporary directories for runtime files.
-
-## Stop conditions
-
-Stop when GPU, Warp, JAX, or cuDSS preflight fails. Do not set
-`JAX_PLATFORMS=cpu` and do not substitute a CPU sparse solver. Stop when B200
-memory or cuDSS workspace is insufficient; qualify a smaller grid or use an
-approved resource option without changing solver mathematics.
+Record the allocation, environment, configuration files, model metadata,
+loss history, and peak memory with production results.

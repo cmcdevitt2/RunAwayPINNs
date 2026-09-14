@@ -1,72 +1,154 @@
 # SlabRpfPinn
 
-GPU finite-volume adjoint and physics-informed neural-network tools for a
-steady 0D--2P relativistic runaway-electron first-passage problem.
+CPU finite-volume and JAX neural-network tools for the steady relativistic
+runaway-electron first-passage problem.
 
-## Contents
+Production workflow is script-driven. Slurm provides resources; JSON files
+provide run configuration; Python scripts generate data, train models, and
+validate results. No notebook state is required.
 
-- `adjoint_fv_solver.py`: Warp/cuDSS finite-volume adjoint/RPF solver.
-- `perlmutter_a100.sbatch`: Perlmutter A100 FV/PINN batch template.
-- `pinn_training.py`: JAX PINN trainer using FV-generated labels.
-- `pinn_training_smoke.toml`: persistent one-case GPU execution smoke test;
-  not a training qualification.
-- `adjoint_fv_solver.toml`: small direct-solver example case.
-- `pinn_training.toml`: training configuration and parameter domain.
-- `rpf_fv_pinn_scientific_reference_v1.tex`: scientific and numerical reference.
-- `docs/HIPERGATOR.md`: Hipergator B200 GPU batch-job workflow.
-- `docs/PERLMUTTER.md`: NERSC Perlmutter A100 GPU batch-job workflow.
-- `docs/DEPENDENCIES.md`: shared cluster-agnostic Python/GPU dependencies.
+## Project structure
 
-The solver is a prescribed-parameter, spatially homogeneous test-particle model;
-it is not a self-consistent plasma evolution code. Preserve the physical and
-numerical contract represented by the source and configuration files.
-The uniform-grid FV baseline uses Chang--Cooper exponential fitting for its
-drift--diffusion fluxes. The LaTeX reference gives the detailed adjoint PDE,
-FV discretization, and PINN qualification requirements.
-The solver also supports optional `xi_mapping = "theta"`, formed by uniform
-theta cells with `xi = -cos(theta)`, and `p_mapping = "log"` or
-`"exponential"`; defaults remain uniform xi and uniform p.
+User entry points:
 
-## Software model
+- `generate_fv_dataset.py` — generate and analyze FV training data.
+- `train_model.py` — train selected mode from `run_configs/train.json`.
+- `validate_model.py` — fresh CPU-FV validation and model plots.
 
-The FV solver assembles the local finite-volume generator on the GPU, forms its
-algebraic transpose for the first-passage adjoint, and uses cuDSS for sparse
-direct solves. The PINN uses JAX/XLA for automatic differentiation, batching,
-and optimization. FV label generation remains outside JAX and uses the same
-GPU-resident Warp/cuDSS path.
+Automatic analytics helpers:
 
-## Quick start on an allocated GPU node
+- `core/fv_dataset.py` — dataset analytics and coverage plots.
+- `core/training_artifacts.py` — automatic loss-history plots.
 
-Run from this directory on an allocated GPU node after following the selected
-cluster guide and [`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md):
+Core implementation (`core/`):
 
-```bash
-python adjoint_fv_solver.py --config adjoint_fv_solver.toml
-python pinn_training.py --config pinn_training.toml
-```
+- `core/rpf_fv_cpu.py` — CPU FV grids, coefficients, operators, and adjoint solve.
+- `core/fv_dataset.py` — FV generation and memory-mapped dataset storage.
+- `core/model.py` — MLP/DeepONet architectures and prediction transforms.
+- `core/pde.py` — coefficients, residuals, boundaries, and collocation sampling.
+- `core/training.py` — shared data, physics, SOAP, SSBroyden, and active loops.
+- `core/training_config.py` — one hierarchical model/loss/optimizer schema.
+- `core/training_artifacts.py` — checkpoints, histories, manifests, and plots.
 
-These commands are intended for an allocated GPU node. Do not run production
-cases on a login node. See `docs/HIPERGATOR.md` for Hipergator B200 or
-`docs/PERLMUTTER.md` for NERSC Perlmutter A100 Slurm commands, resource
-requests, environment setup, logging, and validation checks.
+Distributed orchestration:
 
-For a short Perlmutter execution check, use persistent
-`pinn_training_smoke.toml` through `docs/PERLMUTTER.md`.
+- `core/fv_distributed.py` — one FV rank per node.
 
-Training with `generate = true` writes the FV dataset and model outputs under
-the configured paths. Those generated files are ignored by Git and should be
-reproducible from the committed source and TOML configuration.
+Other scientific code:
 
-## FV label generation
+- `FokkerPlanck-Plasma0d/` — PETSc forward-solver prototype.
+- `rpf_fv_pinn_scientific_reference_v1.tex` — scientific reference.
+- `docs/` — cluster and dependency notes.
 
-`pinn_training.py` generates FV labels outside JAX using the configured GPU FV
-solver, then trains the PINN from those labels. Run it only on an allocated GPU
-node:
+## Environment
+
+On Perlmutter:
 
 ```bash
-python pinn_training.py --config pinn_training.toml
+module purge
+module load python
+conda activate /pscratch/sd/j/jsarnaud/conda-envs/deeprunaway-warp
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export MPLCONFIGDIR=/pscratch/sd/j/jsarnaud/matplotlib-cache
+mkdir -p "$MPLCONFIGDIR"
 ```
 
-Use `pinn_training_smoke.toml` for a short execution-path check. Keep generated
-datasets, models, logs, and plots in ignored output paths or approved scratch
-storage.
+Verify inside allocation:
+
+```bash
+which python
+python --version
+python -c 'import jax; print(jax.default_backend()); print(jax.devices())'
+```
+
+JAX must report `gpu` for model training and validation.
+
+## Configuration
+
+Edit these files:
+
+- `run_configs/fv_dataset.json` — parameter domain, FV grid, Sobol sampling,
+  dataset path, and dataset run directory.
+- `run_configs/train.json` — mode, architecture, losses, optimizer,
+  checkpoints, dataset manifest, optional low-p fill count, and training output
+  paths. It does not duplicate FV-generation settings.
+- `run_configs/validate_model.json` — model path, optional model and saved-
+  dataset manifests, fresh-case count, PDE chunk size, validation output, and
+  plot basename.
+
+See [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) for the meaning of every
+available field.
+
+Select training mode in `train.json`:
+
+```json
+"mode": "data"
+```
+
+or:
+
+```json
+"mode": "physics"
+```
+
+Data mode supports MLP and DeepONet. Physics mode uses pointwise MLP PDE and
+boundary losses with optional SSBroyden refinement.
+
+Every new training run needs new `run_dir`, `output_dir`, and `checkpoint_dir`
+values. Existing completed runs are protected from overwrite.
+
+## Workflow
+
+Obtain Slurm allocation manually. Then run scripts without runtime arguments.
+
+### Generate FV dataset
+
+```bash
+python generate_fv_dataset.py
+```
+
+For multi-node allocations, script launches one CPU task per node. It writes a
+directory-backed memory-mapped dataset under `data/`, then automatically writes
+dataset analytics and coverage plots under `runs/`.
+
+### Train model
+
+```bash
+python train_model.py
+```
+
+Script detects visible GPUs. Data/DeepONet and SOAP physics mode use all
+visible local GPUs and launch one synchronized JAX process per node on
+multi-node allocations. In a multi-node physics run, SSBroyden refinement is
+performed by rank 0 and its parameters are broadcast to the other ranks.
+
+Training writes final parameters, metadata, summary, explicit loss history,
+loss plot, periodic checkpoints, and a hashed completion manifest.
+
+### Validate model
+
+Edit `run_configs/validate_model.json`, then run:
+
+```bash
+python validate_model.py
+```
+
+Validation uses fresh CPU-FV cases by default. Set `dataset_path` in
+`validate_model.json` to evaluate a saved dataset instead. It saves scalar
+metrics, prediction correlations, and selected-case FV RPF/model RPF/error/
+PDE-residual plots.
+
+## Artifact ownership
+
+- `data/` contains active FV datasets.
+- `runs/` contains active dataset and model artifacts.
+
+Manifests and checksums prevent training against incomplete or mismatched
+datasets. Atomic writes prevent readers from seeing partial artifacts.
+
+## Numerical contract
+
+CPU solver uses logarithmic momentum cells, uniform theta cells with
+`xi = cos(theta)`, adaptive FV low-energy placement, absorbing low-energy
+failure, and successful upper-energy escape. Preserve this contract when
+changing sampling, architecture, or loss configuration.
