@@ -182,7 +182,7 @@ def save_validation_plots(output_base, target, prediction, error, pde,
     return correlation_path, cases_path
 
 
-CONFIG_PATH = Path("run_configs/validate_model.json")
+CONFIG_PATH = Path("configs/validate_model.json")
 
 
 def main(config_path=CONFIG_PATH):

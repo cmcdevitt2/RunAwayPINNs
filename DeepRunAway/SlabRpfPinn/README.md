@@ -9,21 +9,29 @@ model (MLP or DeepONet, data-driven or physics-informed), then validate it.
 ## Install
 
 ```bash
-python -m venv .venv
+if [ ! -x .venv/bin/python ]; then
+  python -m venv .venv
+  .venv/bin/pip install -r requirements.txt
+fi
 source .venv/bin/activate
-pip install -r requirements.txt
 ```
 
-Runs fully on CPU. GPUs are optional and only change performance. To use a
-GPU, install the matching CUDA plugin in place of the plain `jax` line, e.g.:
-
-```bash
-pip install "jax[cuda13]"
-```
-
-See [`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md) for the full package list.
+FV generation runs on CPU. Training and validation require GPU JAX.
+`requirements.txt` contains the CUDA 13 JAX stack and the Git sources required
+for SOAP and SSBroyden.
 
 ## Workflow
+
+For production, submit tracked Slurm scripts:
+
+```bash
+mkdir -p logs
+sbatch generate_fv_dataset.sbatch
+sbatch train_model.sbatch
+sbatch validate_model.sbatch
+```
+
+For an active allocation or a small smoke check, run drivers directly:
 
 ```bash
 python generate_fv_dataset.py
@@ -31,9 +39,8 @@ python train_model.py
 python validate_model.py
 ```
 
-Each script reads its own JSON config: `run_configs/fv_dataset.json`,
-`run_configs/train.json`, `run_configs/validate_model.json`. Python config
-schemas validate training values, and comments in the loader code explain
-cross-stage requirements. Each new run needs new
+Each script reads its own JSON config: `configs/fv_dataset.json`,
+`configs/train.json`, `configs/validate_model.json`. Configuration validation
+and manifest checks enforce cross-stage requirements. Each new run needs new
 `run_dir`/`output_dir`/`checkpoint_dir` values; completed runs are protected
 from overwrite.

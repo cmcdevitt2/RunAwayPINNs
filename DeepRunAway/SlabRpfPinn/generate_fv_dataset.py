@@ -16,7 +16,7 @@ import sys
 from core.training_artifacts import finish_run
 
 
-CONFIG_PATH = Path("run_configs/fv_dataset.json")
+CONFIG_PATH = Path("configs/fv_dataset.json")
 
 
 def launch_distributed():

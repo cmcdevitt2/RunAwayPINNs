@@ -179,7 +179,7 @@ def finish_run(manifest_path, *, status, artifacts=None, **extra):
     atomic_write_json(manifest_path, payload)
 
 
-def plot_training_history(config_path=Path("run_configs/train.json"),
+def plot_training_history(config_path=Path("configs/train.json"),
                           run_config=None):
     """Plot data, SOAP, and optional SSBroyden histories."""
     import numpy as np

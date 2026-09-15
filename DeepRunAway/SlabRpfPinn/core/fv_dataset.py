@@ -239,7 +239,11 @@ def save_fv_dataset_npz(path, cases, results, *, p_floor=None, p_max=None):
 
 
 def save_fv_dataset_directory(path, cases, results, *, p_floor=None, p_max=None):
-    """Save FP64 FV arrays as memory maps, then publish by directory rename."""
+    """Save FP64 FV arrays as memory maps, then publish by directory rename.
+
+    Grid filenames use distinct words because ``p_grid.npy`` and
+    ``P_grid.npy`` alias on case-insensitive filesystems.
+    """
     path = Path(path)
     if path.exists():
         raise FileExistsError(f"dataset path already exists: {path}")
@@ -254,13 +258,13 @@ def save_fv_dataset_directory(path, cases, results, *, p_floor=None, p_max=None)
         n_p, n_xi = np.asarray(results[0]["P"]).shape
         np.save(temporary / "cases.npy", np.asarray(cases, dtype=np.float64))
         p_grid = np.lib.format.open_memmap(
-            temporary / "p_grid.npy", mode="w+", dtype=np.float64,
+            temporary / "momentum_grid.npy", mode="w+", dtype=np.float64,
             shape=(n_cases, n_p))
         xi_grid = np.lib.format.open_memmap(
             temporary / "xi_grid.npy", mode="w+", dtype=np.float64,
             shape=(n_cases, n_xi))
         P_grid = np.lib.format.open_memmap(
-            temporary / "P_grid.npy", mode="w+", dtype=np.float64,
+            temporary / "probability_grid.npy", mode="w+", dtype=np.float64,
             shape=(n_cases, n_p, n_xi))
         metadata = []
         for index, result in enumerate(results):
@@ -297,15 +301,36 @@ def save_fv_dataset_directory(path, cases, results, *, p_floor=None, p_max=None)
         raise
 
 
+def _load_directory_array(path, preferred_name, legacy_name, legacy_peer):
+    """Load a new directory filename or a compatible legacy filename."""
+    preferred = path / preferred_name
+    if preferred.exists():
+        return np.load(preferred, mmap_mode="r")
+    legacy = path / legacy_name
+    if not legacy.exists():
+        raise FileNotFoundError(preferred)
+    peer = path / legacy_peer
+    # On a case-insensitive filesystem, old p_grid/P_grid datasets point both
+    # keys at one file and cannot be recovered reliably. Fail instead of
+    # silently returning one field for both arrays.
+    if peer.exists() and os.path.samefile(legacy, peer):
+        raise ValueError(
+            "legacy FV directory has colliding p_grid/P_grid filenames; "
+            "regenerate the dataset")
+    return np.load(legacy, mmap_mode="r")
+
+
 def load_fv_dataset(path):
-    """Load NPZ arrays or read-only directory memory maps by path type."""
+    """Load NPZ arrays or directory memory maps, with legacy name support."""
     path = Path(path)
     if path.is_dir():
         return {
             "cases": np.load(path / "cases.npy", mmap_mode="r"),
-            "p_grid": np.load(path / "p_grid.npy", mmap_mode="r"),
+            "p_grid": _load_directory_array(
+                path, "momentum_grid.npy", "p_grid.npy", "P_grid.npy"),
             "xi_grid": np.load(path / "xi_grid.npy", mmap_mode="r"),
-            "P_grid": np.load(path / "P_grid.npy", mmap_mode="r"),
+            "P_grid": _load_directory_array(
+                path, "probability_grid.npy", "P_grid.npy", "p_grid.npy"),
             "p_floor": np.load(path / "p_floor.npy", mmap_mode="r"),
             "p_max": np.load(path / "p_max.npy", mmap_mode="r"),
             "case_metadata_json": np.asarray(
@@ -408,7 +433,7 @@ def plot_fv_coverage(dataset_path, output_path):
     plt.close(fig)
 
 
-def analyze_fv_dataset(config_path="run_configs/fv_dataset.json"):
+def analyze_fv_dataset(config_path="configs/fv_dataset.json"):
     config = json.loads(Path(config_path).read_text())
     dataset = Path(config.get("dataset", config["dataset_path"]))
     run_dir = Path(config.get("run_dir", dataset.parent))

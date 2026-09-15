@@ -1012,7 +1012,7 @@ def _split_cases(cases, results, train_fraction, seed):
             cases[test_ids], [results[i] for i in test_ids])
 
 
-def train_data_from_config(config_path=Path("run_configs/train.json"),
+def train_data_from_config(config_path=Path("configs/train.json"),
                            run_config=None):
     """Validate data, train model, and publish rank-0 artifacts."""
     from core.fv_dataset import load_fv_cases
@@ -1199,7 +1199,7 @@ def _build_physics_inputs(dataset, cases, parameter_domain, domain):
     return z, y, case_index
 
 
-def train_physics_from_config(config_path=Path("run_configs/train.json"),
+def train_physics_from_config(config_path=Path("configs/train.json"),
                               config=None):
     """Build collocation inputs, run physics phases, and publish artifacts."""
     from core.fv_dataset import (
