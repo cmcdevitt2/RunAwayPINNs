@@ -31,13 +31,40 @@ def mlp_raw(params, z):
     return _apply_mlp(params, z)[..., 0]
 
 
-def probability_transform(raw):
+def _sigmoid_transform(raw, z):
     """Map unconstrained output to the open probability interval (0, 1)."""
     return jax.nn.sigmoid(raw)
 
 
+def _structural_lowp_transform(raw, z):
+    """Structurally enforce P(p_min, xi) = 0 (reference sec. 4.1)."""
+    p_hat = z[..., 0]
+    return jnp.tanh((p_hat ** 2) * (raw ** 2))
+
+
+OUTPUT_TRANSFORMS = {
+    "sigmoid": _sigmoid_transform,
+    "structural_lowp": _structural_lowp_transform,
+}
+
+
+def probability_transform(raw, z):
+    """Default output transform; kept for back-compatible direct callers."""
+    return _sigmoid_transform(raw, z)
+
+
 def probability(params, z):
-    return probability_transform(mlp_raw(params, z))
+    return probability_transform(mlp_raw(params, z), z)
+
+
+def make_probability(output_transform="sigmoid"):
+    """Build (probability, jit-compiled predict) closing over a named transform."""
+    transform = OUTPUT_TRANSFORMS[output_transform]
+
+    def probability_fn(params, z):
+        return transform(mlp_raw(params, z), z)
+
+    return probability_fn, jax.jit(probability_fn)
 
 
 predict = jax.jit(probability)
@@ -78,14 +105,14 @@ def init_model(key, config: TrainingConfig):
     return init_mlp(key, width=config.width, depth=config.depth)
 
 
-def deeponet_probability(params, branch_z, trunk_z):
+def deeponet_probability(params, branch_z, trunk_z, *, transform=_sigmoid_transform):
     """Evaluate DeepONet output for grouped cases and phase-space points."""
     branch = _apply_mlp(params["branch"], branch_z)
     shape = trunk_z.shape
     trunk = _apply_mlp(params["trunk"], trunk_z.reshape((-1, 2)))
     trunk = trunk.reshape(shape[:-1] + (trunk.shape[-1],))
     raw = jnp.sum(branch[..., None, :] * trunk, axis=-1) + params["bias"]
-    return probability_transform(raw)
+    return transform(raw, trunk_z)
 
 
 def save_model(path, params):

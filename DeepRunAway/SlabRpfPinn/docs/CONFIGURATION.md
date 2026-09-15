@@ -48,6 +48,10 @@ The six parameters are `E/Ec`, `Te_eV`, `nD_m3`, `nNe_m3`, `zD`, and `zNe`.
 - `latent_width`: DeepONet latent size.
 - `branch_width`, `branch_depth`: DeepONet parameter-branch architecture.
 - `trunk_width`, `trunk_depth`: DeepONet phase-space-trunk architecture.
+- `output_transform`: named scheme mapping raw network output to `P∈(0,1)`.
+  `sigmoid` (default) is unconstrained; `structural_lowp` architecturally
+  enforces `P(p_min,ξ)=0` via `P=tanh(p̂²·raw²)` instead of relying only on the
+  `enable_low_p_bc` loss term.
 
 ### `loss`
 
@@ -55,6 +59,13 @@ The six parameters are `E/Ec`, `Te_eV`, `nD_m3`, `nNe_m3`, `zD`, and `zNe`.
   `enable_pmax_bc`: enable the corresponding objective terms.
 - `data_weight`, `pde_weight`, `threshold_weight`, `low_p_weight`, and
   `bc_weight`: nonnegative term weights.
+- `residual_coeff_norm`: named scheme rescaling the PDE coefficient vector
+  before the residual is formed (separate from the `dp_dpnorm`
+  change-of-variables Jacobian, which is always applied and not configurable).
+  `cf_ebar` (default) divides by `|cf|·√ēbar`; `coeff_l2` divides by the
+  per-point coefficient-vector L2 norm; `none` disables rescaling.
+- `residual_floor`: additive floor `P + residual_floor` in the PDE residual
+  denominator, guarding against blow-up near `P→0`. Must be `>= 0`.
 
 ### `optimizer`
 - `steps`: SOAP optimizer steps.

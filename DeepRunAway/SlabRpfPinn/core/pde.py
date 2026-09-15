@@ -251,7 +251,24 @@ def drift_up(z, domain: PinnDomain):
     return -ebar * xi - cf - alpha * gamma * p * (1.0 - xi * xi)
 
 
-def pde_coefficients(z, domain: PinnDomain):
+def rescale_coefficients(coefficients, cf, ebar, coeff_norm="cf_ebar"):
+    """Apply the named heuristic scale-balancing scheme for PDE coefficients.
+
+    This is distinct from the change-of-variables Jacobian already folded
+    into `a_p` inside `pde_coefficients`, which is a correctness factor and
+    must not be made configurable.
+    """
+    if coeff_norm == "cf_ebar":
+        return coefficients / jnp.abs(cf) / jnp.sqrt(ebar)
+    if coeff_norm == "coeff_l2":
+        norm = jnp.sqrt(jnp.sum(coefficients ** 2, axis=-1, keepdims=True))
+        return coefficients / jnp.maximum(norm, 1.0e-30)
+    if coeff_norm == "none":
+        return coefficients
+    raise ValueError("coeff_norm must be 'cf_ebar', 'coeff_l2', or 'none'")
+
+
+def pde_coefficients(z, domain: PinnDomain, coeff_norm: str = "cf_ebar"):
     p, xi, ebar, te, nD, nNe, zD, zNe = split_inputs(z, domain)
     cf, nud, alpha = collision_coefficients(p, te, nD, nNe, zD, zNe, domain.B_T)
     gamma = jnp.sqrt(1.0 + p * p)
@@ -262,36 +279,46 @@ def pde_coefficients(z, domain: PinnDomain):
     a_p = -up / dp_dpnorm
     a_xi = 0.5 * ((1.0 - xi * xi) * (ebar / p - alpha * xi / gamma) + nud * xi)
     a_xixi = -0.25 * 0.5 * nud * (1.0 - xi * xi)
-    return jnp.stack([a_p, a_xi, a_xixi], axis=-1) / jnp.abs(cf) / jnp.sqrt(ebar)
+    coefficients = jnp.stack([a_p, a_xi, a_xixi], axis=-1)
+    return rescale_coefficients(coefficients, cf, ebar, coeff_norm)
 
 
-def residual_single(params, z, coefficients):
+def residual_single(params, z, coefficients, probability_fn, residual_floor=0.1):
     phase = z[:2]
     def probability_phase(q):
         zz = z.at[0].set(q[0]).at[1].set(q[1])
-        from core.model import probability
-        return probability(params, zz)
+        return probability_fn(params, zz)
     grad_phase = jax.grad(probability_phase)(phase)
     _, second_xi = jax.jvp(
         lambda q: jax.grad(probability_phase)(q)[1],
         (phase,), (jnp.array([0.0, 1.0]),))
-    from core.model import probability
-    P = probability(params, z)
+    P = probability_fn(params, z)
+    denom = jnp.maximum(P + residual_floor, 1.0e-12)
     return (coefficients[0] * grad_phase[0]
             + coefficients[1] * grad_phase[1]
-            + coefficients[2] * second_xi) / (P + 0.1)
+            + coefficients[2] * second_xi) / denom
 
 
-def make_pde_functions(domain: PinnDomain):
-    coefficients = jax.jit(jax.vmap(lambda z: pde_coefficients(z, domain)))
-    residual = jax.jit(jax.vmap(residual_single, in_axes=(None, 0, 0)))
+def make_pde_functions(domain: PinnDomain, *, probability_fn=None,
+                       coeff_norm: str = "cf_ebar", residual_floor: float = 0.1):
+    if probability_fn is None:
+        from core.model import probability as probability_fn
+    coefficients = jax.jit(jax.vmap(
+        lambda z: pde_coefficients(z, domain, coeff_norm)))
+    residual = jax.jit(jax.vmap(
+        lambda params, z, c: residual_single(
+            params, z, c, probability_fn, residual_floor),
+        in_axes=(None, 0, 0)))
     return coefficients, residual
 
 
-def evaluate_pde_residuals(params, z, domain: PinnDomain, *, chunk_size=65536):
-    from core.model import probability  # ensures model module is initialized
+def evaluate_pde_residuals(params, z, domain: PinnDomain, *, chunk_size=65536,
+                           probability_fn=None, coeff_norm: str = "cf_ebar",
+                           residual_floor: float = 0.1):
     z = np.asarray(z, dtype=np.float64)
-    coeff_fn, residual_fn = make_pde_functions(domain)
+    coeff_fn, residual_fn = make_pde_functions(
+        domain, probability_fn=probability_fn, coeff_norm=coeff_norm,
+        residual_floor=residual_floor)
     values = []
     for start in range(0, len(z), chunk_size):
         batch = jnp.asarray(z[start:start + chunk_size])

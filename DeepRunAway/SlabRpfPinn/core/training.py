@@ -648,13 +648,15 @@ def _soap_optimizer(config):
     )
 
 
-def _predict_host_chunks(params, z, *, chunk_size=65536):
+def _predict_host_chunks(params, z, *, chunk_size=65536, predict_fn=None):
     """Evaluate predictions without materializing a large device batch."""
+    if predict_fn is None:
+        predict_fn = predict
     z = np.asarray(z, dtype=np.float64)
     values = []
     for start in range(0, len(z), chunk_size):
         values.append(np.asarray(jax.device_get(
-            predict(params, jnp.asarray(z[start:start + chunk_size])))))
+            predict_fn(params, jnp.asarray(z[start:start + chunk_size])))))
     return np.concatenate(values) if values else np.empty(0, dtype=np.float64)
 
 
@@ -705,7 +707,9 @@ def _shard_leading(values, devices):
     return jax.device_put_sharded(shards, devices)
 
 
-def _grouped_deeponet_mse(params, data, *, max_cases=None):
+def _grouped_deeponet_mse(params, data, *, max_cases=None, transform=None):
+    if transform is None:
+        transform = OUTPUT_TRANSFORMS["sigmoid"]
     if max_cases is not None:
         data = {name: values[:max_cases] for name, values in data.items()}
     numerator = 0.0
@@ -715,7 +719,7 @@ def _grouped_deeponet_mse(params, data, *, max_cases=None):
         prediction = np.asarray(jax.device_get(deeponet_probability(
             params,
             jnp.asarray(data["branch"][start:stop]),
-            jnp.asarray(data["trunk"][start:stop]))))
+            jnp.asarray(data["trunk"][start:stop]), transform=transform)))
         error = prediction - data["target"][start:stop]
         mask = data["mask"][start:stop]
         numerator += float(np.sum(mask * error * error))
@@ -723,10 +727,13 @@ def _grouped_deeponet_mse(params, data, *, max_cases=None):
     return numerator / max(denominator, 1.0)
 
 
-def _grouped_deeponet_metrics(params, train_data, test_data):
+def _grouped_deeponet_metrics(params, train_data, test_data,
+                              *, transform=None):
+    if transform is None:
+        transform = OUTPUT_TRANSFORMS["sigmoid"]
     metrics = {}
-    metrics["train_mse"] = _grouped_deeponet_mse(params, train_data)
-    metrics["test_mse"] = _grouped_deeponet_mse(params, test_data)
+    metrics["train_mse"] = _grouped_deeponet_mse(params, train_data, transform=transform)
+    metrics["test_mse"] = _grouped_deeponet_mse(params, test_data, transform=transform)
     return metrics
 
 
@@ -774,6 +781,7 @@ def train_supervised_deeponet(train_data, test_data, *, config, distributed=Fals
     opt_state = optimizer.init(params)
     params = jax.device_put_replicated(params, devices)
     opt_state = jax.device_put_replicated(opt_state, devices)
+    transform = OUTPUT_TRANSFORMS[config.output_transform]
 
     pmap_kwargs = {"axis_name": "data"}
     if not distributed:
@@ -782,7 +790,8 @@ def train_supervised_deeponet(train_data, test_data, *, config, distributed=Fals
     @partial(jax.pmap, **pmap_kwargs)
     def step(params, opt_state, branch_z, trunk_z, target, mask):
         def loss_fn(params):
-            error = deeponet_probability(params, branch_z, trunk_z) - target
+            error = deeponet_probability(
+                params, branch_z, trunk_z, transform=transform) - target
             count = jax.lax.psum(jnp.sum(mask), axis_name="data")
             return jnp.sum(mask * error * error) * n_devices / jnp.maximum(count, 1.0)
         loss, gradients = jax.value_and_grad(loss_fn)(params)
@@ -810,7 +819,8 @@ def train_supervised_deeponet(train_data, test_data, *, config, distributed=Fals
                     or step_number + 1 == config.steps):
                 train_loss = float(jax.device_get(loss[0]))
                 test_loss = _grouped_deeponet_mse(
-                    _unreplicate(params), test_data, max_cases=test_case_limit)
+                    _unreplicate(params), test_data, max_cases=test_case_limit,
+                    transform=transform)
                 if not distributed or jax.process_index() == 0:
                     history.append([train_loss, test_loss])
             checkpoint_due = (
@@ -831,7 +841,7 @@ def train_supervised_deeponet(train_data, test_data, *, config, distributed=Fals
         from jax.experimental import multihost_utils
         multihost_utils.sync_global_devices("deeponet_training_complete")
     params = _unreplicate(params)
-    metrics = (_grouped_deeponet_metrics(params, train_data, test_data)
+    metrics = (_grouped_deeponet_metrics(params, train_data, test_data, transform=transform)
                if not distributed or jax.process_index() == 0 else {})
     return params, np.asarray(history), metrics
 
@@ -881,6 +891,7 @@ def train_supervised_mlp_grouped(train_data, test_data, *, config,
     opt_state = optimizer.init(params)
     params = jax.device_put_replicated(params, devices)
     opt_state = jax.device_put_replicated(opt_state, devices)
+    probability_fn, predict_fn = make_probability(config.output_transform)
     pmap_kwargs = {"axis_name": "data"}
     if not distributed:
         pmap_kwargs["devices"] = devices
@@ -888,7 +899,7 @@ def train_supervised_mlp_grouped(train_data, test_data, *, config,
     @partial(jax.pmap, **pmap_kwargs)
     def step(params, opt_state, z_batch, y_batch, mask):
         def loss_fn(params):
-            error = probability(params, z_batch) - y_batch
+            error = probability_fn(params, z_batch) - y_batch
             count = jax.lax.psum(jnp.sum(mask), axis_name="data")
             return jnp.sum(mask * error * error) * n_devices / jnp.maximum(count, 1.0)
         loss, gradients = jax.value_and_grad(loss_fn)(params)
@@ -913,7 +924,7 @@ def train_supervised_mlp_grouped(train_data, test_data, *, config,
             if test_sampler is not None:
                 z_test, y_test = test_sampler.next(test_size)
                 test_prediction = _predict_host_chunks(
-                    _unreplicate(params), z_test)
+                    _unreplicate(params), z_test, predict_fn=predict_fn)
                 test_loss = float(np.mean((test_prediction - y_test) ** 2))
             else:
                 test_loss = 0.0
@@ -940,10 +951,10 @@ def train_supervised_mlp_grouped(train_data, test_data, *, config,
     params = _unreplicate(params)
     if not distributed or jax.process_index() == 0:
         z_train, y_train = sampler.next(min(global_batch_size, test_size))
-        train_prediction = _predict_host_chunks(params, z_train)
+        train_prediction = _predict_host_chunks(params, z_train, predict_fn=predict_fn)
         if test_sampler is not None:
             z_test, y_test = test_sampler.next(test_size)
-            test_prediction = _predict_host_chunks(params, z_test)
+            test_prediction = _predict_host_chunks(params, z_test, predict_fn=predict_fn)
         else:
             y_test = np.empty(0, dtype=np.float64)
             test_prediction = y_test
@@ -1021,7 +1032,11 @@ def _train_physics_multi(z_data, y_data, z_pde, z_bc, *, domain, config,
     opt_state = optimizer.init(params)
     params = jax.device_put_replicated(params, devices)
     opt_state = jax.device_put_replicated(opt_state, devices)
-    coeff_fn, residual_fn = make_pde_functions(domain)
+    probability_fn, _ = make_probability(config.output_transform)
+    coeff_fn, residual_fn = make_pde_functions(
+        domain, probability_fn=probability_fn,
+        coeff_norm=config.residual_coeff_norm,
+        residual_floor=config.residual_floor)
     pmap_kwargs = {} if distributed else {"devices": devices}
     coeff_pmap = jax.pmap(coeff_fn, **pmap_kwargs)
     boundary_pmap = jax.pmap(
@@ -1039,17 +1054,17 @@ def _train_physics_multi(z_data, y_data, z_pde, z_bc, *, domain, config,
             return jnp.sum(mask * values * values) * n_devices / jnp.maximum(count, 1.0)
 
         def loss_fn(params):
-            data_loss = (scaled_mse(probability(params, zd) - yd, md)
+            data_loss = (scaled_mse(probability_fn(params, zd) - yd, md)
                          if config.enable_data else jnp.asarray(0.0, jnp.float64))
             pde_loss = (scaled_mse(residual_fn(params, zp, cp), mp)
                         if config.enable_pde else jnp.asarray(0.0, jnp.float64))
             threshold_loss = (scaled_mse(residual_fn(params, zt, ct), mt)
                 if config.enable_pde and config.enable_threshold_pde
                 else jnp.asarray(0.0, jnp.float64))
-            low_p_loss = (scaled_mse(probability(params, zl), ml)
+            low_p_loss = (scaled_mse(probability_fn(params, zl), ml)
                           if config.enable_low_p_bc
                           else jnp.asarray(0.0, jnp.float64))
-            bc_loss = (scaled_mse(probability(params, zb) - 1.0, mb * active)
+            bc_loss = (scaled_mse(probability_fn(params, zb) - 1.0, mb * active)
                        if config.enable_pmax_bc
                        else jnp.asarray(0.0, jnp.float64))
             total = (config.data_weight * data_loss + config.pde_weight * pde_loss
@@ -1186,7 +1201,11 @@ def train_physics_informed(z_data, y_data, z_pde, z_bc, *, domain,
     threshold_weight = config.threshold_weight if use_threshold and config.enable_threshold_pde else 0.0
     z_pde_threshold = (jnp.asarray(z_pde_threshold) if use_threshold else z_pde[:1])
     z_low = jnp.asarray(z_low) if use_low else z_bc[:1]
-    coeff_fn, residual_fn = make_pde_functions(domain)
+    probability_fn, _ = make_probability(config.output_transform)
+    coeff_fn, residual_fn = make_pde_functions(
+        domain, probability_fn=probability_fn,
+        coeff_norm=config.residual_coeff_norm,
+        residual_floor=config.residual_floor)
     coeff_pde = coeff_fn(z_pde)
     coeff_pde_threshold = coeff_fn(z_pde_threshold)
     bc_active = (success_boundary_target(z_bc, domain)
@@ -1194,17 +1213,17 @@ def train_physics_informed(z_data, y_data, z_pde, z_bc, *, domain,
     @jax.jit
     def step(params, opt_state, zd, yd, zp, cb, zt, ct, zl, zb, yb):
         def loss_fn(params):
-            data_loss = (jnp.mean((probability(params, zd) - yd) ** 2)
+            data_loss = (jnp.mean((probability_fn(params, zd) - yd) ** 2)
                          if config.enable_data else jnp.asarray(0.0, dtype=jnp.float64))
             pde_loss = (jnp.mean(residual_fn(params, zp, cb) ** 2)
                         if config.enable_pde else jnp.asarray(0.0, dtype=jnp.float64))
             threshold_loss = (jnp.mean(residual_fn(params, zt, ct) ** 2)
                               if config.enable_pde and config.enable_threshold_pde
                               else jnp.asarray(0.0, dtype=jnp.float64))
-            low_p_loss = (jnp.mean(probability(params, zl) ** 2)
+            low_p_loss = (jnp.mean(probability_fn(params, zl) ** 2)
                           if config.enable_low_p_bc
                           else jnp.asarray(0.0, dtype=jnp.float64))
-            bc_loss = jnp.sum(yb * (probability(params, zb) - 1.0) ** 2) / jnp.maximum(jnp.sum(yb), 1.0)
+            bc_loss = jnp.sum(yb * (probability_fn(params, zb) - 1.0) ** 2) / jnp.maximum(jnp.sum(yb), 1.0)
             if not config.enable_pmax_bc:
                 bc_loss = jnp.asarray(0.0, dtype=jnp.float64)
             total = (config.data_weight * data_loss + config.pde_weight * pde_loss
@@ -1290,7 +1309,11 @@ def train_physics_active(z_data, y_data, z_pde, z_bc, *, domain,
                 band_width=float(active_config.get(
                     "threshold_band_width", 0.02))))
         candidates = np.concatenate(candidate_parts, axis=0)
-        residual = evaluate_pde_residuals(params, candidates, domain)
+        probability_fn, _ = make_probability(config.output_transform)
+        residual = evaluate_pde_residuals(
+            params, candidates, domain, probability_fn=probability_fn,
+            coeff_norm=config.residual_coeff_norm,
+            residual_floor=config.residual_floor)
         score = np.abs(np.asarray(residual, dtype=np.float64))
         score[~np.isfinite(score)] = -np.inf
         count = min(acquire_points, len(candidates))
@@ -1433,24 +1456,28 @@ def train_ssbroyden(params, z_data, y_data, z_pde, z_bc, *, domain,
     threshold_weight = config.threshold_weight if use_threshold and config.enable_threshold_pde else 0.0
     z_pde_threshold = (jnp.asarray(z_pde_threshold) if use_threshold else z_pde[:1])
     z_low = jnp.asarray(z_low) if use_low else z_bc[:1]
-    coeff_fn, residual_fn = make_pde_functions(domain)
+    probability_fn, _ = make_probability(config.output_transform)
+    coeff_fn, residual_fn = make_pde_functions(
+        domain, probability_fn=probability_fn,
+        coeff_norm=config.residual_coeff_norm,
+        residual_floor=config.residual_floor)
     coeff_pde = coeff_fn(z_pde)
     coeff_pde_threshold = coeff_fn(z_pde_threshold)
     bc_active = success_boundary_target(z_bc, domain)
     weights, unravel = ravel_pytree(params)
 
     def loss_components(p):
-        data_loss = (jnp.mean((probability(p, z_data) - y_data) ** 2)
+        data_loss = (jnp.mean((probability_fn(p, z_data) - y_data) ** 2)
                      if config.enable_data else jnp.asarray(0.0, dtype=jnp.float64))
         pde_loss = (jnp.mean(residual_fn(p, z_pde, coeff_pde) ** 2)
                     if config.enable_pde else jnp.asarray(0.0, dtype=jnp.float64))
         threshold_loss = (jnp.mean(residual_fn(p, z_pde_threshold, coeff_pde_threshold) ** 2)
                           if config.enable_pde and config.enable_threshold_pde
                           else jnp.asarray(0.0, dtype=jnp.float64))
-        low_p_loss = (jnp.mean(probability(p, z_low) ** 2)
+        low_p_loss = (jnp.mean(probability_fn(p, z_low) ** 2)
                       if config.enable_low_p_bc
                       else jnp.asarray(0.0, dtype=jnp.float64))
-        bc_loss = jnp.sum(bc_active * (probability(p, z_bc) - 1.0) ** 2) / jnp.maximum(jnp.sum(bc_active), 1.0)
+        bc_loss = jnp.sum(bc_active * (probability_fn(p, z_bc) - 1.0) ** 2) / jnp.maximum(jnp.sum(bc_active), 1.0)
         if not config.enable_pmax_bc:
             bc_loss = jnp.asarray(0.0, dtype=jnp.float64)
         total = (config.data_weight * data_loss + config.pde_weight * pde_loss
@@ -1568,8 +1595,8 @@ def initialize_slurm_jax(local_gpu_count):
 # compatibility scaffold while all active calls resolve to the new modules.
 from core.training_config import PinnConfig, PinnDomain, make_pinn_config
 from core.model import (
-    deeponet_probability, init_model, load_model, predict, probability,
-    save_model,
+    OUTPUT_TRANSFORMS, deeponet_probability, init_model, load_model,
+    make_probability, predict, probability, save_model,
 )
 from core.pde import (
     analytic_threshold_collocation, evaluate_pde_residuals,
@@ -1696,6 +1723,7 @@ def train_data_from_config(config_path=Path("run_configs/train.json"),
                     "branch_depth": config.branch_depth,
                     "trunk_width": config.trunk_width,
                     "trunk_depth": config.trunk_depth,
+                    "output_transform": config.output_transform,
                 },
                 "domain": run_config["domain"],
                 "normalization": {"p_floor": config.domain.p_min,
@@ -1708,6 +1736,10 @@ def train_data_from_config(config_path=Path("run_configs/train.json"),
                 },
                 "parameter_domain": run_config["parameter_domain"],
                 "dataset": run_config["dataset_path"],
+                "residual_regularization": {
+                    "coeff_norm": config.residual_coeff_norm,
+                    "floor": config.residual_floor,
+                },
             }
             summary = {
                 "dataset_path": run_config["dataset_path"],
@@ -1757,6 +1789,7 @@ def _normalize_parameter_cases(cases, parameter_domain):
 
 
 def _build_physics_inputs(dataset, cases, parameter_domain, domain, low_p_Np):
+    from core.fv_dataset import flatten_fv_dataset
     flat = flatten_fv_dataset(dataset)
     case_index = np.asarray(flat["case_index"], dtype=np.int64)
     p = np.asarray(flat["p"], dtype=np.float64)
@@ -1963,10 +1996,11 @@ def train_physics_from_config(config_path=Path("run_configs/train.json"),
                     config=training_config, checkpoint_callback=checkpoint,
                     step_offset=training_config.steps * active_cycles)
         if jax.process_index() == 0:
+            _, predict_fn = make_probability(training_config.output_transform)
             prediction_train = np.asarray(jax.device_get(
-                predict(params, jnp.asarray(z_all[train_idx]))))
+                predict_fn(params, jnp.asarray(z_all[train_idx]))))
             prediction_test = np.asarray(jax.device_get(
-                predict(params, jnp.asarray(z_all[test_idx]))))
+                predict_fn(params, jnp.asarray(z_all[test_idx]))))
             metadata = {"architecture": {
                 "input_dim": 8, "model_type": training_config.model_type,
                 "width": training_config.width, "depth": training_config.depth,
@@ -1975,6 +2009,7 @@ def train_physics_from_config(config_path=Path("run_configs/train.json"),
                 "branch_depth": training_config.branch_depth,
                 "trunk_width": training_config.trunk_width,
                 "trunk_depth": training_config.trunk_depth,
+                "output_transform": training_config.output_transform,
             }, "domain": config["domain"], "normalization": {
                 "p_floor": domain.p_min, "p_max": domain.p_max,
             }, "training_config": {"model": config.get("model", {}),
@@ -1983,7 +2018,11 @@ def train_physics_from_config(config_path=Path("run_configs/train.json"),
                                     "data": config.get("data", {})},
             "parameter_domain": config["parameter_domain"],
             "dataset": str(dataset_path),
-            "initial_model": initial_model}
+            "initial_model": initial_model,
+            "residual_regularization": {
+                "coeff_norm": training_config.residual_coeff_norm,
+                "floor": training_config.residual_floor,
+            }}
             summary = {"dataset": str(dataset_path),
                        "train_cases": int(len(train_cases)),
                        "test_cases": int(len(test_cases)),

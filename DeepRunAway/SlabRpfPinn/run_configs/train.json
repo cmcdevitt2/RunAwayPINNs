@@ -34,7 +34,8 @@
     "branch_width": 64,
     "branch_depth": 6,
     "trunk_width": 64,
-    "trunk_depth": 6
+    "trunk_depth": 6,
+    "output_transform": "sigmoid"
   },
   "loss": {
     "enable_data": true,
@@ -46,7 +47,9 @@
     "pde_weight": 1.0,
     "threshold_weight": 1.0,
     "low_p_weight": 1.0,
-    "bc_weight": 1.0
+    "bc_weight": 1.0,
+    "residual_coeff_norm": "cf_ebar",
+    "residual_floor": 0.1
   },
   "optimizer": {
     "steps": 1000,

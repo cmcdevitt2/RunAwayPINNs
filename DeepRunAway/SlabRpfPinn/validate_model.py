@@ -15,7 +15,7 @@ import jax.numpy as jnp
 import numpy as np
 from core.fv_dataset import flatten_fv_dataset, generate_cpu_cases, load_fv_cases
 from core.training_config import PinnDomain
-from core.model import load_model, predict
+from core.model import load_model, make_probability
 from core.pde import drift_up, make_pde_functions, normalize_momentum, sobol_6d
 from core.training_artifacts import (
     atomic_write_json, sha256_path, validate_dataset_manifest,
@@ -77,9 +77,12 @@ def build_validation_inputs(dataset, cases, p_floor, p_max,
     return z
 
 
-def evaluate_pde_chunked(params, z, domain, chunk_size):
+def evaluate_pde_chunked(params, z, domain, chunk_size, *, probability_fn=None,
+                         coeff_norm="cf_ebar", residual_floor=0.1):
     """Evaluate literal PINN residual in bounded JAX batches."""
-    coeff_fn, residual_fn = make_pde_functions(domain)
+    coeff_fn, residual_fn = make_pde_functions(
+        domain, probability_fn=probability_fn, coeff_norm=coeff_norm,
+        residual_floor=residual_floor)
     values = []
     for start in range(0, len(z), chunk_size):
         batch = jnp.asarray(z[start:start + chunk_size])
@@ -213,6 +216,16 @@ def main(config_path=CONFIG_PATH):
         "training_config", metadata.get("pinn_config", {}))
     model_type = architecture.get(
         "model_type", training_config.get("model_type", "mlp"))
+    output_transform = architecture.get(
+        "output_transform",
+        training_config.get("model", {}).get("output_transform", "sigmoid"))
+    regularization = metadata.get("residual_regularization", {})
+    loss_config = training_config.get("loss", {})
+    coeff_norm = regularization.get(
+        "coeff_norm", loss_config.get("residual_coeff_norm", "cf_ebar"))
+    residual_floor = float(regularization.get(
+        "floor", loss_config.get("residual_floor", 0.1)))
+    probability_fn, predict_fn = make_probability(output_transform)
     width = int(metadata["architecture"]["width"])
     depth = int(metadata["architecture"]["depth"])
     params = load_model(
@@ -263,13 +276,15 @@ def main(config_path=CONFIG_PATH):
         data, cases, p_floor, p_max, momentum_sampling, parameter_domain)
     target = np.asarray(data["P"], dtype=np.float64)
     stage_start = time.perf_counter()
-    prediction = np.asarray(jax.device_get(predict(params, jnp.asarray(z))))
+    prediction = np.asarray(jax.device_get(predict_fn(params, jnp.asarray(z))))
     print(f"PINN prediction: {time.perf_counter() - stage_start:.3f} s", flush=True)
     error = prediction - target
 
     case_index = np.asarray(data["case_index"], dtype=np.int64)
     stage_start = time.perf_counter()
-    pde = evaluate_pde_chunked(params, z, domain, args.pde_chunk)
+    pde = evaluate_pde_chunked(
+        params, z, domain, args.pde_chunk, probability_fn=probability_fn,
+        coeff_norm=coeff_norm, residual_floor=residual_floor)
     print(f"PDE residual: {time.perf_counter() - stage_start:.3f} s", flush=True)
     pde_rms = float(np.sqrt(np.mean(pde * pde)))
 
@@ -325,4 +340,5 @@ def main(config_path=CONFIG_PATH):
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    main(Path(sys.argv[1])) if len(sys.argv) > 1 else main()

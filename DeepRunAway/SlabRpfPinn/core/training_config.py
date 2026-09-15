@@ -35,6 +35,7 @@ class ModelConfig:
     branch_depth: int = 3
     trunk_width: int = 32
     trunk_depth: int = 3
+    output_transform: str = "sigmoid"
 
     def __post_init__(self):
         if self.model_type not in ("mlp", "deeponet"):
@@ -43,6 +44,10 @@ class ModelConfig:
                 or self.branch_width <= 0 or self.branch_depth < 0
                 or self.trunk_width <= 0 or self.trunk_depth < 0):
             raise ValueError("invalid model architecture setting")
+        from core.model import OUTPUT_TRANSFORMS
+        if self.output_transform not in OUTPUT_TRANSFORMS:
+            raise ValueError(
+                f"output_transform must be one of {sorted(OUTPUT_TRANSFORMS)}")
 
 
 @dataclass(frozen=True)
@@ -57,6 +62,8 @@ class LossConfig:
     threshold_weight: float = 1.0
     low_p_weight: float = 1.0
     bc_weight: float = 1.0
+    residual_coeff_norm: str = "cf_ebar"
+    residual_floor: float = 0.1
 
     def __post_init__(self):
         if not any((self.enable_data, self.enable_pde,
@@ -68,6 +75,11 @@ class LossConfig:
                 self.data_weight, self.pde_weight, self.threshold_weight,
                 self.low_p_weight, self.bc_weight)):
             raise ValueError("loss weights must be non-negative")
+        if self.residual_coeff_norm not in ("cf_ebar", "coeff_l2", "none"):
+            raise ValueError(
+                "residual_coeff_norm must be 'cf_ebar', 'coeff_l2', or 'none'")
+        if self.residual_floor < 0.0:
+            raise ValueError("residual_floor must be non-negative")
 
 
 @dataclass(frozen=True)
