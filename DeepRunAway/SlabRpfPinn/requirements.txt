@@ -1,0 +1,17 @@
+# Base/CPU stack. Sufficient for CPU FV dataset generation.
+numpy
+scipy
+joblib
+matplotlib
+tqdm
+
+# Model training/validation stack. Runs on CPU with the plain jax pulled in
+# here. For GPU, install a CUDA plugin matched to the allocated GPU instead
+# (Perlmutter has CUDA 13 GPUs):
+#   pip install "jax[cuda13]"
+# See docs/DEPENDENCIES.md.
+jax
+optax
+soap-jax
+equinox
+optimistix

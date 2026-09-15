@@ -1,11 +1,14 @@
 # Codex instructions for SlabRpfPinn
 
+Read [`docs/PROJECT_CONTEXT.md`](docs/PROJECT_CONTEXT.md) first: monorepo
+context, local-vs-remote-HPC execution split, and self-contained `./.venv`.
+
 ## Mission
 
-Maintain a compact, reproducible GPU finite-volume adjoint and JAX PINN
-workflow. Preserve the physical and numerical contract represented by the
-source and configuration files. Treat solver correctness, GPU residency,
-cuDSS usage, and reproducibility as first-class requirements.
+Maintain a compact, reproducible CPU finite-volume adjoint dataset generator
+and JAX PINN training/validation workflow. Preserve the physical and
+numerical contract represented by the source and configuration files. Treat
+solver correctness, FP64, and reproducibility as first-class requirements.
 
 ## Operating mode
 
@@ -23,9 +26,10 @@ cuDSS usage, and reproducibility as first-class requirements.
 
 ## Context and token discipline
 
-- Read README, then all documentation in `docs/` when that directory exists,
-  followed by the relevant config/code; read large data, generated output, and
-  reference documents only when the task requires them.
+- Read `docs/PROJECT_CONTEXT.md`, then `README.md`, then the relevant
+  documentation in `docs/`, followed by the relevant config/code; read large
+  data, generated output, and reference documents only when the task requires
+  them.
 - Search symbols and call sites before opening whole files.
 - Keep delegated messages narrow and ask for path/line findings or a small patch,
   not an essay.
@@ -58,33 +62,74 @@ User instructions and higher-priority system/developer instructions override
 this file and any skill guidance. If a skill changes scope or blocks work,
 identify the exact skill and instruction before pausing.
 
-## Scientific and runtime rules
+## Code ownership
 
-- `adjoint_fv_solver.py` owns FV assembly, algebraic transpose, and cuDSS solves.
-- `pinn_training.py` dynamically loads the configured FV solver and keeps FV
-  label generation outside JAX autodiff.
-- Keep Warp, cuDSS, and JAX on the same allocated CUDA device. Preserve FP64.
-- Run production solver/training workloads only in Slurm GPU batch jobs. Login
-  nodes are for inspection, syntax checks, and submission.
-- Use the neighboring environment at `../.venv` from this directory.
-- Verify JAX devices and Warp CUDA devices before expensive work. CPU fallback is
-  not an acceptable substitute for the cuDSS path.
-- Keep generated datasets, models, logs, plots, and caches out of Git.
+- `core/rpf_fv_cpu.py` owns the CPU finite-volume discretization and adjoint
+  solve.
+- `core/fv_dataset.py` owns case generation, flattening/coarsening, storage,
+  and loading.
+- `core/fv_distributed.py` owns multi-node CPU dataset orchestration.
+- `core/model.py` owns MLP/DeepONet architecture and prediction.
+- `core/pde.py` owns normalized physical coefficients, residuals, boundaries,
+  and collocation sampling.
+- `core/training.py` owns data, physics, SOAP, SSBroyden, and active loops.
+- `core/training_config.py` owns the hierarchical training schema.
+- `core/training_artifacts.py` owns manifests, checksums, atomic writes, file
+  barriers, checkpoints, and histories.
+- The three root Python files (`generate_fv_dataset.py`, `train_model.py`,
+  `validate_model.py`) are config-only user entry points.
+
+Keep FV label generation outside JAX automatic differentiation. Preserve the
+normalized eight-coordinate model interface, FP64, probability bounds, FV
+boundary semantics, and parameter-domain definitions unless the task
+explicitly changes the numerical model.
+
+See [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md) before editing
+`core/training.py` — it has a known dead-code defect.
+
+## Environment
+
+Self-contained `./.venv` inside this directory, on the local machine and on
+every HPC cluster. Never activate an environment outside `SlabRpfPinn/`. See
+`docs/PROJECT_CONTEXT.md` and `docs/DEPENDENCIES.md` for install steps and the
+`jax[cuda13]` requirement on HPC.
+
+## Configuration contract
+
+There are three active JSON files:
+
+- `run_configs/fv_dataset.json` for FV data generation;
+- `run_configs/train.json` for model mode, architecture, losses, optimizer,
+  resource usage, and artifact paths;
+- `run_configs/validate_model.json` for model loading and analytics.
+
+Do not add runtime CLI options to the root drivers. A new run uses new artifact
+directories; completed run directories are protected from overwrite.
 
 ## Verification ladder
 
-1. Syntax and TOML parsing.
-2. Import/config and small CPU structural checks when GPU libraries permit.
-3. GPU backend check inside a Slurm allocation.
-4. Solver qualification: residual, transpose, escape identity, probability
-   bounds, and refinement checks.
-5. PINN checks: coefficient parity, training/validation separation, held-out
-   cases, and saved metadata.
+1. Parse all active JSON configurations.
+2. Compile root drivers and `core/` with the project Python.
+3. Import core drivers and verify the JAX backend/FP64 (CPU backend is a
+   valid pass here — everything in this project runs on CPU; GPU only
+   changes performance, never correctness).
+4. For FV changes, run a small CPU case and check probability bounds, residual,
+   and dataset manifest completion.
+5. For training changes, first run a short CPU-only training pass (small
+   Sobol count, few steps) and inspect checkpoint and loss-history files —
+   this is the cheapest correctness check and does not need an allocation.
+   Only escalate to a GPU allocation to confirm production-scale behavior or
+   GPU-path-specific code (device sharding, multi-host init).
+6. For validation changes, verify model and optional dataset manifests plus
+   their checksums before analytics.
+7. For multi-node data training, verify one rank per node, global device count,
+   synchronized completion, and a single final artifact set.
 
-Match verification effort to change risk. Stop after required checks pass unless
-new failures or unresolved concerns justify broader testing.
+Do not run production CPU generation or GPU training on login nodes. Do not
+claim multi-node qualification from syntax/import checks alone.
 
 ## Completion report
 
-State: result first; changed files; verification performed; known limitations;
-commit hash if committed. Keep output brief.
+State: result first; changed files; verification performed; runtime
+limitations; any remaining cluster-specific requirement; commit hash if
+committed. Keep output brief.

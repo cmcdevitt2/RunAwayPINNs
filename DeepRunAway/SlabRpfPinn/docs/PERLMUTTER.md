@@ -3,6 +3,11 @@
 This is the Perlmutter runbook for the current config-driven workflow. It
 does not use a notebook, GPU FV solver, cuDSS, or legacy TOML entry points.
 CPU finite-volume data generation and GPU model training are separate stages.
+The environment is the project's own `./.venv` — see
+[`DEPENDENCIES.md`](DEPENDENCIES.md) and
+[`PROJECT_CONTEXT.md`](PROJECT_CONTEXT.md). Create it once with
+`python -m venv .venv && pip install -r requirements.txt`, then
+`pip install "jax[cuda13]"` inside a GPU allocation before training.
 
 ## Environment and allocation
 
@@ -33,7 +38,7 @@ Inside that shell:
 cd /pscratch/sd/j/jsarnaud/git/RunAwayPINNs/DeepRunAway/SlabRpfPinn
 module purge
 module load python
-conda activate /pscratch/sd/j/jsarnaud/conda-envs/deeprunaway-warp
+source .venv/bin/activate
 
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export PYTHONUNBUFFERED=1
@@ -45,8 +50,8 @@ export NUMEXPR_NUM_THREADS="$OMP_NUM_THREADS"
 python -c 'import jax; print(jax.default_backend()); print(jax.devices())'
 ```
 
-Training requires a JAX GPU backend. FV generation is CPU work and should use
-the CPUs assigned by Slurm.
+Training runs on CPU or GPU; GPU only changes speed. FV generation is CPU
+work and should use the CPUs assigned by Slurm.
 
 ## Batch jobs
 
@@ -72,7 +77,7 @@ set -euo pipefail
 cd "$SLURM_SUBMIT_DIR"
 module purge
 module load python
-conda activate /pscratch/sd/j/jsarnaud/conda-envs/deeprunaway-warp
+source .venv/bin/activate
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS="$SLURM_CPUS_PER_TASK"
