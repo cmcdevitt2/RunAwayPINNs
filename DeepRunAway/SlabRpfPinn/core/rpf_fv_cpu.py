@@ -12,7 +12,6 @@ from scipy import constants, special, sparse
 from scipy.optimize import brentq
 
 MEC2_EV = constants.m_e * constants.c**2 / constants.e
-R_E = constants.e**2 / (4 * np.pi * constants.epsilon_0 * constants.m_e * constants.c**2)
 
 # Hesslow screening data. Entries index partially stripped charge states
 # Z0=0,...,Z-1; fully stripped state receives zero bound-electron data.
@@ -328,46 +327,6 @@ def assemble_fp_operator(grid: Grid, plasma: DerivedPlasma, coll: CollisionData)
                            np.where(i < Np - 1, row + Nxi, row)))
     rows = np.tile(row, 5)
     return sparse.coo_matrix((data, (rows, cols)), shape=(M, M)).tocsr()
-
-
-def ch_knockon_dsigma_bar_dp(p1, p):
-    gamma1 = np.sqrt(1 + p1**2)
-    gamma = np.sqrt(1 + p**2)
-    beta = p / gamma
-    eps1 = gamma1 - 1
-    eps = gamma - 1
-    x = eps1**2 / (eps * (gamma1 - gamma))
-    return 2 * np.pi * beta * gamma1**2 / (eps1**3 * (gamma1 + 1)) * (
-        x**2 - 3 * x + (eps1 / gamma1)**2 * (1 + x))
-
-
-def assemble_ch_operator(grid: Grid, cfg: PlasmaConfig, plasma: DerivedPlasma, p_m=0.1):
-    Np, Nxi = len(grid.p_center), len(grid.xi_center)
-    P, XI = np.meshgrid(grid.p_center, grid.xi_center, indexing='ij')
-    gamma = np.sqrt(1 + P**2)
-    eps = gamma - 1
-    eps_m = np.sqrt(1 + p_m**2) - 1
-    den = 1 + XI**2 - gamma * (1 - XI**2)
-    with np.errstate(divide='ignore', invalid='ignore'):
-        p1 = -2 * P * XI / den
-    mask = ((eps >= eps_m) & (XI < 0) & (den > 0) & np.isfinite(p1)
-            & (p1 >= grid.p_face[0]) & (p1 < grid.p_face[-1]))
-    i, j = np.nonzero(mask)
-    p1v = p1[i, j]
-    eps1 = np.sqrt(1 + p1v**2) - 1
-    keep = eps[i, j] <= 0.5 * eps1
-    i, j, p1v = i[keep], j[keep], p1v[keep]
-    p = grid.p_center[i]
-    xi = grid.xi_center[j]
-    k = np.searchsorted(grid.p_face, p1v, side='right') - 1
-    ds = ch_knockon_dsigma_bar_dp(p1v, p)
-    n_t = sum(ion.Z * np.sum(ion.n) for ion in cfg.ions)
-    pref = plasma.tau_c * n_t * constants.c * R_E**2
-    coeff = pref * ds * p1v**4 / (p**2 * np.abs(xi))
-    rows = np.repeat(i * Nxi + j, Nxi)
-    cols = (k[:, None] * Nxi + np.arange(Nxi)).ravel()
-    vals = np.repeat(coeff * grid.xi_cell_widths[j], Nxi)
-    return sparse.coo_matrix((vals, (rows, cols)), shape=(Np * Nxi, Np * Nxi)).tocsr()
 
 
 def physical_adjoint_operator(L, grid: Grid):
