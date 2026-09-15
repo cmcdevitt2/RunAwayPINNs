@@ -39,8 +39,8 @@ Run the forward solver inside a Slurm allocation:
 
 ```bash
 MPICH_GPU_SUPPORT_ENABLED=0 srun -n 4 \
-  /pscratch/sd/j/jsarnaud/git/RunAwayPINNs/DeepRunAway/SlabRpfPinn/.petsc-cpu-venv/bin/python \
-  /pscratch/sd/j/jsarnaud/git/RunAwayPINNs/DeepRunAway/SlabRpfPinn/FokkerPlanck-Plasma0d/petsc_forward_solver.py \
+  /pscratch/sd/j/jsarnaud/git/RunAwayPINNs/DeepRunAway/FokkerPlanck-Plasma0d/.petsc-cpu-venv/bin/python \
+  /pscratch/sd/j/jsarnaud/git/RunAwayPINNs/DeepRunAway/FokkerPlanck-Plasma0d/petsc_forward_solver.py \
   --coupled --pmax 100.0 \
   --t-end 1.0e-4 --dtau-initial 2.5e-5
 ```
