@@ -42,9 +42,15 @@ def _structural_lowp_transform(raw, z):
     return jnp.tanh((p_hat ** 2) * (raw ** 2))
 
 
+def _tanh_transform(raw, z):
+    """Map unconstrained output to the open probability interval (0, 1)."""
+    return 0.5 * (1.0 + jnp.tanh(raw))
+
+
 OUTPUT_TRANSFORMS = {
     "sigmoid": _sigmoid_transform,
     "structural_lowp": _structural_lowp_transform,
+    "tanh": _tanh_transform,
 }
 
 
