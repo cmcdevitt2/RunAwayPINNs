@@ -135,13 +135,12 @@ class DataConfig:
     train_case_fraction: float = 0.8
     train_points: int = 200000
     test_points: int = 100000
-    low_p_Np: int = 0
     seed: int = 2026
 
     def __post_init__(self):
         if not 0.0 < self.train_case_fraction < 1.0:
             raise ValueError("train_case_fraction must be between 0 and 1")
-        if self.train_points < 0 or self.test_points < 0 or self.low_p_Np < 0:
+        if self.train_points < 0 or self.test_points < 0:
             raise ValueError("invalid data sampling setting")
 
 
@@ -174,6 +173,7 @@ class ActiveConfig:
     fv_Nxi: int = 64
     fv_p_stride: int = 1
     fv_xi_stride: int = 1
+    fv_p_coarse_N: int = 32
     n_jobs: int = -1
     seed: int = 12026
 
@@ -182,6 +182,7 @@ class ActiveConfig:
                 or self.threshold_points < 0 or self.acquire_points <= 0
                 or self.fv_Np <= 0 or self.fv_Nxi <= 0
                 or self.fv_p_stride <= 0 or self.fv_xi_stride <= 0
+                or self.fv_p_coarse_N < 1
                 or self.n_jobs == 0):
             raise ValueError("invalid active-training setting")
         if not 0.0 < self.threshold_band_width < 1.0:

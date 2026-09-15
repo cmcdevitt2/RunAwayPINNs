@@ -84,8 +84,7 @@
     "train_case_fraction": 0.8,
     "train_points": 65536,
     "test_points": 32768,
-    "seed": 2026,
-    "low_p_Np": 8
+    "seed": 2026
   },
   "collocation": {
     "pde_points": 65536,

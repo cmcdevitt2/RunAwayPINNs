@@ -186,6 +186,7 @@ def main(config_path=CONFIG_PATH):
         cases=int(config.get("cases", 32)),
         fv_Np=int(config.get("fv_Np", 512)),
         fv_Nxi=int(config.get("fv_Nxi", 128)),
+        fv_p_coarse_N=int(config.get("fv_p_coarse_N", 32)),
         pde_chunk=int(config.get("pde_chunk", 8192)),
         n_jobs=int(config.get("n_jobs", -1)),
         seed=int(config.get("seed", 9090)),
@@ -255,7 +256,8 @@ def main(config_path=CONFIG_PATH):
         stage_start = time.perf_counter()
         results = generate_cpu_cases(
             cases, p_max=p_max, Np=args.fv_Np, Nxi=args.fv_Nxi,
-            B_T=B_T, n_jobs=args.n_jobs)
+            B_T=B_T, p_min_global=p_floor, N_p_coarse=args.fv_p_coarse_N,
+            n_jobs=args.n_jobs)
         print(f"FV generation: {time.perf_counter() - stage_start:.3f} s", flush=True)
         keep = np.array([
             not result["trivial_zero"] and result.get("valid", True)
@@ -298,7 +300,7 @@ def main(config_path=CONFIG_PATH):
                 name: float(value)
                 for name, value in zip(parameter_names, cases[case_number])
             },
-            "p_min": float(results[case_number]["p_min"]),
+            "p_dense_min": float(results[case_number]["p_dense_min"]),
             "trivial_zero": bool(results[case_number]["trivial_zero"]),
             "mse": float(np.mean(error[mask] ** 2)),
             "max_abs_error": float(np.max(np.abs(error[mask]))),

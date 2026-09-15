@@ -130,7 +130,8 @@ def _main(config_path):
         local_results = generate_cpu_cases(
             local_cases, p_max=dataset_config["p_max"],
             Np=dataset_config["fv_Np"], Nxi=dataset_config["fv_Nxi"],
-            B_T=dataset_config["B_T"], n_jobs=worker_count)
+            B_T=dataset_config["B_T"], p_min_global=dataset_config["fv_p_min"],
+            N_p_coarse=dataset_config["fv_p_coarse_N"], n_jobs=worker_count)
         local_results = coarsen_fv_cases(
             local_results, p_stride=dataset_config["fv_p_stride"],
             xi_stride=dataset_config["fv_xi_stride"])

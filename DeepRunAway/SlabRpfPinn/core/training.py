@@ -765,14 +765,12 @@ def train_physics_active(z_data, y_data, z_pde, z_bc, *, domain,
     return params, combined_history, records
 
 
-def exact_deeponet_inputs(cases, results, parameter_domain, domain, low_p_Np=0,
+def exact_deeponet_inputs(cases, results, parameter_domain, domain,
                           max_points=None):
     """Build grouped normalized DeepONet tensors directly from FV cases."""
     cases = np.asarray(cases, dtype=np.float64)
     if len(cases) != len(results) or len(cases) == 0:
         raise ValueError("cases and FV results must have equal nonzero length")
-    if low_p_Np < 0:
-        raise ValueError("low-p Np must be non-negative")
     case_norm = _normalize_parameter_cases(cases, parameter_domain)
     trunks, targets = [], []
     for result in results:
@@ -787,20 +785,6 @@ def exact_deeponet_inputs(cases, results, parameter_domain, domain, low_p_Np=0,
         xi_norm = 0.5 * (xx.ravel() + 1.0)
         trunk = np.column_stack((p_norm, xi_norm))
         target = field.ravel()
-        if low_p_Np:
-            p_upper = float(result["p_min"])
-            if p_upper > domain.p_min:
-                p_low = np.geomspace(domain.p_min, p_upper, low_p_Np + 2)[1:-1]
-                pp_low, xx_low = np.meshgrid(p_low, xi, indexing="ij")
-                trunk = np.vstack((
-                    trunk,
-                    np.column_stack((
-                        normalize_momentum(pp_low.ravel(), domain.p_min,
-                                           domain.p_max, domain.momentum_sampling),
-                        0.5 * (xx_low.ravel() + 1.0),
-                    )),
-                ))
-                target = np.concatenate((target, np.zeros(pp_low.size)))
         trunks.append(trunk)
         targets.append(target)
     local_max_points = max(len(trunk) for trunk in trunks)
@@ -1071,20 +1055,15 @@ def train_data_from_config(config_path=Path("run_configs/train.json"),
         local_cases = train_cases[process::processes]
         local_results = train_results[process::processes]
         def points(result):
-            count = len(result["p"]) * len(result["xi"])
-            if run_config.get("data", {}).get("low_p_Np", 0) and result["p_min"] > config.domain.p_min:
-                count += int(run_config["data"]["low_p_Np"]) * len(result["xi"])
-            return count
+            return len(result["p"]) * len(result["xi"])
         max_points = max(points(result) for result in train_results + test_results)
         grouped_train = exact_deeponet_inputs(
             local_cases, local_results, run_config["parameter_domain"],
-            config.domain, int(run_config.get("data", {}).get("low_p_Np", 0)),
-            max_points=max_points)
+            config.domain, max_points=max_points)
         if process == 0:
             grouped_test = exact_deeponet_inputs(
                 test_cases, test_results, run_config["parameter_domain"],
-                config.domain, int(run_config.get("data", {}).get("low_p_Np", 0)),
-                max_points=max_points)
+                config.domain, max_points=max_points)
         else:
             grouped_test = {
                 "branch": np.empty((0, 6)),
@@ -1181,7 +1160,7 @@ def _normalize_parameter_cases(cases, parameter_domain):
     return normalized
 
 
-def _build_physics_inputs(dataset, cases, parameter_domain, domain, low_p_Np):
+def _build_physics_inputs(dataset, cases, parameter_domain, domain):
     from core.fv_dataset import flatten_fv_dataset
     flat = flatten_fv_dataset(dataset)
     case_index = np.asarray(flat["case_index"], dtype=np.int64)
@@ -1193,27 +1172,6 @@ def _build_physics_inputs(dataset, cases, parameter_domain, domain, low_p_Np):
     case_norm = _normalize_parameter_cases(cases, parameter_domain)
     z[:, 2:] = case_norm[case_index]
     y = np.asarray(flat["P"], dtype=np.float64)
-    metadata = json.loads(str(np.asarray(dataset["case_metadata_json"]).item()))
-    low_z, low_y, low_indices = [], [], []
-    xi_grid = np.asarray(dataset["xi_grid"], dtype=np.float64)
-    for index, item in enumerate(metadata):
-        p_min_case = float(item["p_min"])
-        if low_p_Np <= 0 or p_min_case <= domain.p_min:
-            continue
-        p_low = np.geomspace(domain.p_min, p_min_case, low_p_Np + 2)[1:-1]
-        pp, xx = np.meshgrid(p_low, xi_grid[index], indexing="ij")
-        z_low = np.empty((pp.size, 8), dtype=np.float64)
-        z_low[:, 0] = normalize_momentum(
-            pp.ravel(), domain.p_min, domain.p_max, domain.momentum_sampling)
-        z_low[:, 1] = 0.5 * (xx.ravel() + 1.0)
-        z_low[:, 2:] = case_norm[index]
-        low_z.append(z_low)
-        low_y.append(np.zeros(pp.size, dtype=np.float64))
-        low_indices.append(np.full(pp.size, index, dtype=np.int64))
-    if low_z:
-        z = np.concatenate((z, np.concatenate(low_z)))
-        y = np.concatenate((y, np.concatenate(low_y)))
-        case_index = np.concatenate((case_index, np.concatenate(low_indices)))
     return z, y, case_index
 
 
@@ -1293,9 +1251,8 @@ def train_physics_from_config(config_path=Path("run_configs/train.json"),
             if training_config.checkpoint_every > 0 else None)
         dataset = load_fv_dataset(dataset_path)
         cases = np.asarray(dataset["cases"], dtype=np.float64)
-        low_p_Np = int(config.get("data", {}).get("low_p_Np", 0))
         z_all, y_all, case_index = _build_physics_inputs(
-            dataset, cases, config["parameter_domain"], domain, low_p_Np)
+            dataset, cases, config["parameter_domain"], domain)
         rng = np.random.default_rng(training_config.seed)
         permutation = rng.permutation(len(cases))
         n_train = min(
@@ -1340,7 +1297,9 @@ def train_physics_from_config(config_path=Path("run_configs/train.json"),
                 results = generate_cpu_cases(
                     selected_cases, p_max=domain.p_max,
                     Np=int(active.get("fv_Np", 256)), Nxi=int(active.get("fv_Nxi", 64)),
-                    B_T=domain.B_T, n_jobs=int(active.get("n_jobs", -1)))
+                    B_T=domain.B_T, p_min_global=domain.p_min,
+                    N_p_coarse=int(active.get("fv_p_coarse_N", 32)),
+                    n_jobs=int(active.get("n_jobs", -1)))
                 keep = np.asarray([
                     not result["trivial_zero"] and result.get("valid", True)
                     for result in results])

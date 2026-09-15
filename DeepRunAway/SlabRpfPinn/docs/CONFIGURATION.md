@@ -18,6 +18,11 @@ The six parameters are `E/Ec`, `Te_eV`, `nD_m3`, `nNe_m3`, `zD`, and `zNe`.
 - `B_T`: magnetic field in tesla.
 - `fv_Np`, `fv_Nxi`: fine FV momentum and angular cell counts before coarsening.
 - `fv_p_stride`, `fv_xi_stride`: exact cell-center strides saved to disk.
+- `fv_p_min`: single prescribed global momentum floor for every saved case.
+  Below the solver's per-case adaptive front, RPF is analytically zero, so
+  this range is filled with zeros rather than solved.
+- `fv_p_coarse_N`: number of coarse log-spaced cells added below the adaptive
+  front to reach `fv_p_min`. Every case has the same total grid length.
 - `n_jobs`: Joblib workers per CPU rank; `-1` derives a safe count from Slurm.
 - `seed`: scrambled Sobol seed.
 - `candidate_oversample`: candidate multiplier used while rejecting trivial-zero
@@ -95,9 +100,10 @@ Physics mode requires `model.model_type: "mlp"`. Data mode supports both models.
   split is by case, never by individual FV cell.
 - `train_points`, `test_points`: point counts used by the physics-data split.
 - `seed`: deterministic case split and sampling seed.
-- `low_p_Np`: optional number of synthetic zero-target points inserted between
-  the global `p_min` and each adaptive FV case minimum for DeepONet regularization.
-  This is a training option, not an FV-generation option.
+
+Every FV case already spans the same prescribed `[fv_p_min, p_max]` grid (see
+`fv_dataset.json`), so no low-`p` data augmentation is needed on the training
+side.
 
 ### `collocation`
 
@@ -122,6 +128,9 @@ Physics mode requires `model.model_type: "mlp"`. Data mode supports both models.
   cases for new FV labels.
 - `active.fv_Np`, `active.fv_Nxi`: CPU FV resolution for acquired cases.
 - `active.fv_p_stride`, `active.fv_xi_stride`: exact FV coarsening strides.
+- `active.fv_p_coarse_N`: coarse zero-cell count below the adaptive front,
+  matching `dataset_config.fv_p_coarse_N`; acquired cases use `domain.p_min`
+  as the prescribed floor.
 - `active.n_jobs`: CPU workers for acquired FV cases.
 - `active.seed`: Sobol seed for dense residual candidates.
 - `initial_model`: optional saved parameter file used to restart/refine a
@@ -148,6 +157,8 @@ Use fresh `output_dir`, `checkpoint_dir`, and `run_dir` values for every run.
 - `dataset_manifest`: checksum/compatibility manifest for `dataset_path`.
 - `cases`: number of new Sobol validation cases when no saved dataset is used.
 - `fv_Np`, `fv_Nxi`: CPU FV resolution for fresh validation cases.
+- `fv_p_coarse_N`: coarse zero-cell count below the adaptive front; fresh
+  cases use the model's saved `p_floor` as the prescribed global minimum.
 - `pde_chunk`: maximum JAX PDE-residual batch size.
 - `n_jobs`: CPU workers for fresh FV generation.
 - `seed`: validation Sobol seed.

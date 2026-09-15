@@ -35,6 +35,8 @@ class FvDatasetConfig:
     fv_Nxi: int = 128
     fv_p_stride: int = 2
     fv_xi_stride: int = 4
+    fv_p_min: float = 0.002
+    fv_p_coarse_N: int = 32
     n_jobs: int = 1
     seed: int = 2026
     candidate_oversample: float = 1.25
@@ -43,6 +45,8 @@ class FvDatasetConfig:
         if (self.n_cases <= 0 or self.p_max <= 0.0 or self.B_T < 0.0
                 or self.fv_Np <= 0 or self.fv_Nxi <= 0
                 or self.fv_p_stride <= 0 or self.fv_xi_stride <= 0
+                or self.fv_p_min <= 0.0 or self.fv_p_min >= self.p_max
+                or self.fv_p_coarse_N < 1
                 or self.n_jobs < -1 or self.n_jobs == 0
                 or self.candidate_oversample < 1.0):
             raise ValueError("invalid FV dataset setting")
@@ -64,8 +68,26 @@ def _charge_state_densities(total, mean_charge, Z):
     return total * np.maximum(0.0, 1.0 - np.abs(mean_charge - q))
 
 
-def solve_cpu_case(case, *, p_max, Np, Nxi, B_T, p_scan_min=1.0e-12):
-    """Solve one normalized-E D/Ne case on its adaptive log-p grid."""
+def _prepend_zero_tail(p_center, P, p_min_global, N_p_coarse):
+    """Prepend a coarse zero-P tail so every case spans [p_min_global, p_max].
+
+    RPF is guaranteed zero below the dense grid's adaptive floor, so the tail
+    needs no solve: it is filled analytically.
+    """
+    p_coarse = np.geomspace(p_min_global, p_center[0], N_p_coarse + 1)[:-1]
+    p_full = np.concatenate((p_coarse, p_center))
+    P_full = np.vstack((np.zeros((N_p_coarse, P.shape[1]), dtype=np.float64), P))
+    return p_full, P_full
+
+
+def solve_cpu_case(case, *, p_max, Np, Nxi, B_T, p_min_global, N_p_coarse,
+                    p_scan_min=1.0e-12):
+    """Solve one normalized-E D/Ne case on its adaptive dense log-p grid.
+
+    The returned grid always spans the prescribed [p_min_global, p_max]: cells
+    below the adaptive dense floor are filled with the analytically known
+    zero probability rather than solved.
+    """
     case_start = time.perf_counter()
     ebar, te_eV, nD, nNe, zD, zNe = map(float, case)
     D = ion_species_from_charge_state_densities(1, _charge_state_densities(nD, zD, 1))
@@ -81,12 +103,14 @@ def solve_cpu_case(case, *, p_max, Np, Nxi, B_T, p_scan_min=1.0e-12):
     p_cap = 0.75 * p_max
     if up_max_minus_one <= 0.0:
         # No outward drift exists at the successful boundary: RPF is zero.
-        p_min = min(p_cap, max(p_scan_min, p_max * 1.0e-6))
-        grid = build_grid(GridConfig(p_min=p_min, p_max=p_max, N_p=Np, N_xi=Nxi))
+        p_dense_min = min(p_cap, max(p_scan_min, p_max * 1.0e-6))
+        grid = build_grid(GridConfig(p_min=p_dense_min, p_max=p_max, N_p=Np, N_xi=Nxi))
         P = np.zeros((Np, Nxi), dtype=np.float64)
+        p_full, P_full = _prepend_zero_tail(
+            grid.p_center, P, p_min_global, N_p_coarse)
         return {
-            "case": np.asarray(case, dtype=np.float64), "p": grid.p_center,
-            "xi": grid.xi_center, "P": P, "p_min": p_min,
+            "case": np.asarray(case, dtype=np.float64), "p": p_full,
+            "xi": grid.xi_center, "P": P_full, "p_dense_min": p_dense_min,
             "p_zero": np.nan, "trivial_zero": True,
             "valid": True, "probability_min": 0.0, "probability_max": 0.0,
             "up_max_minus_one": up_max_minus_one, "linear_residual": 0.0,
@@ -94,9 +118,9 @@ def solve_cpu_case(case, *, p_max, Np, Nxi, B_T, p_scan_min=1.0e-12):
         }
     p_zero = find_up_zero_momentum(template, plasma_cfg, plasma)
     energy_zero = np.sqrt(1.0 + p_zero**2) - 1.0
-    p_min_uncapped = momentum_from_kinetic_energy(0.5 * energy_zero)
-    p_min = min(p_min_uncapped, p_cap)
-    grid = build_grid(GridConfig(p_min=p_min, p_max=p_max, N_p=Np, N_xi=Nxi))
+    p_dense_min_uncapped = momentum_from_kinetic_energy(0.5 * energy_zero)
+    p_dense_min = min(p_dense_min_uncapped, p_cap)
+    grid = build_grid(GridConfig(p_min=p_dense_min, p_max=p_max, N_p=Np, N_xi=Nxi))
     coll = build_collision_data(grid, plasma_cfg, plasma)
     L = assemble_fp_operator(grid, plasma, coll)
     failure, escape = radial_boundary_rates(grid, plasma, coll)
@@ -112,15 +136,17 @@ def solve_cpu_case(case, *, p_max, Np, Nxi, B_T, p_scan_min=1.0e-12):
         and np.isfinite(residual).all()
         and probability_min >= -PROBABILITY_TOLERANCE
         and probability_max <= 1.0 + PROBABILITY_TOLERANCE)
+    p_full, P_full = _prepend_zero_tail(
+        grid.p_center, P, p_min_global, N_p_coarse)
     return {
         "case": np.asarray(case, dtype=np.float64),
-        "p": grid.p_center,
+        "p": p_full,
         "xi": grid.xi_center,
-        "P": P,
-        "p_min": p_min,
+        "P": P_full,
+        "p_dense_min": p_dense_min,
         "p_zero": p_zero,
         "trivial_zero": False,
-        "p_min_capped": p_min < p_min_uncapped,
+        "p_min_capped": p_dense_min < p_dense_min_uncapped,
         "valid": valid,
         "probability_min": probability_min,
         "probability_max": probability_max,
@@ -131,10 +157,12 @@ def solve_cpu_case(case, *, p_max, Np, Nxi, B_T, p_scan_min=1.0e-12):
     }
 
 
-def generate_cpu_cases(cases, *, p_max, Np, Nxi, B_T, n_jobs=-1, p_scan_min=1.0e-12):
+def generate_cpu_cases(cases, *, p_max, Np, Nxi, B_T, p_min_global, N_p_coarse,
+                        n_jobs=-1, p_scan_min=1.0e-12):
     """Generate adaptive-grid FV cases in parallel with joblib."""
-    worker = partial(solve_cpu_case, p_max=p_max, Np=Np, Nxi=Nxi,
-                     B_T=B_T, p_scan_min=p_scan_min)
+    worker = partial(solve_cpu_case, p_max=p_max, Np=Np, Nxi=Nxi, B_T=B_T,
+                     p_min_global=p_min_global, N_p_coarse=N_p_coarse,
+                     p_scan_min=p_scan_min)
     return Parallel(n_jobs=n_jobs, backend="loky")(
         delayed(worker)(case) for case in np.asarray(cases, dtype=np.float64)
     )
@@ -177,7 +205,7 @@ def save_fv_dataset_npz(path, cases, results, *, p_floor=None, p_max=None):
     xi_grid = np.stack([result["xi"] for result in results])
     P_grid = np.stack([result["P"] for result in results])
     metadata = [{
-        "p_min": float(result["p_min"]),
+        "p_dense_min": float(result["p_dense_min"]),
         "p_zero": float(result["p_zero"]) if np.isfinite(result["p_zero"]) else None,
             "trivial_zero": bool(result["trivial_zero"]),
             "valid": bool(result.get("valid", True)),
@@ -231,7 +259,7 @@ def save_fv_dataset_directory(path, cases, results, *, p_floor=None, p_max=None)
             xi_grid[index] = result["xi"]
             P_grid[index] = field
             metadata.append({
-                "p_min": float(result["p_min"]),
+                "p_dense_min": float(result["p_dense_min"]),
                 "p_zero": float(result["p_zero"]) if np.isfinite(result["p_zero"]) else None,
                 "trivial_zero": bool(result["trivial_zero"]),
                 "valid": bool(result.get("valid", True)),
@@ -305,7 +333,7 @@ def summarize_fv_dataset(dataset_path):
     xi_grid = np.asarray(dataset["xi_grid"], dtype=np.float64)
     fields = np.asarray(dataset["P_grid"], dtype=np.float64)
     metadata = json.loads(str(np.asarray(dataset["case_metadata_json"]).item()))
-    p_min = np.asarray([item["p_min"] for item in metadata], dtype=np.float64)
+    p_dense_min = np.asarray([item["p_dense_min"] for item in metadata], dtype=np.float64)
     runtime = np.asarray(
         [item["runtime_seconds"] for item in metadata], dtype=np.float64)
     valid = np.asarray([item.get("valid", True) for item in metadata], dtype=bool)
@@ -315,7 +343,7 @@ def summarize_fv_dataset(dataset_path):
         "cases": int(len(cases)),
         "grid_shape": [int(value) for value in fields.shape[1:]],
         "points": int(fields.size),
-        "p_min_range": [float(p_min.min()), float(p_min.max())],
+        "p_dense_min_range": [float(p_dense_min.min()), float(p_dense_min.max())],
         "p_range": [float(p_grid.min()), float(p_grid.max())],
         "xi_range": [float(xi_grid.min()), float(xi_grid.max())],
         "probability_range": [float(fields.min()), float(fields.max())],
@@ -345,13 +373,13 @@ def plot_fv_coverage(dataset_path, output_path):
     cases = np.asarray(dataset["cases"], dtype=np.float64)
     fields = np.asarray(dataset["P_grid"], dtype=np.float64)
     metadata = json.loads(str(np.asarray(dataset["case_metadata_json"]).item()))
-    p_min = np.asarray([item["p_min"] for item in metadata], dtype=np.float64)
+    p_dense_min = np.asarray([item["p_dense_min"] for item in metadata], dtype=np.float64)
     runtime = np.asarray(
         [item["runtime_seconds"] for item in metadata], dtype=np.float64)
     zero_fraction = np.mean(fields == 0.0, axis=(1, 2))
     fig, axes = plt.subplots(2, 3, figsize=(15, 8), constrained_layout=True)
-    axes[0, 0].hist(p_min, bins=40)
-    axes[0, 0].set(xscale="log", xlabel="adaptive FV p_min", ylabel="cases")
+    axes[0, 0].hist(p_dense_min, bins=40)
+    axes[0, 0].set(xscale="log", xlabel="adaptive dense-zone front", ylabel="cases")
     axes[0, 1].hist(runtime, bins=40)
     axes[0, 1].set(xlabel="runtime [s/case]", ylabel="cases")
     axes[0, 2].scatter(cases[:, 0], cases[:, 1], s=4, alpha=0.35)
@@ -360,8 +388,8 @@ def plot_fv_coverage(dataset_path, output_path):
     axes[1, 0].set(xscale="log", yscale="log", xlabel="nD", ylabel="nNe")
     axes[1, 1].scatter(cases[:, 4], cases[:, 5], s=4, alpha=0.35)
     axes[1, 1].set(xlabel="zD", ylabel="zNe")
-    axes[1, 2].scatter(p_min, zero_fraction, s=4, alpha=0.35)
-    axes[1, 2].set(xscale="log", xlabel="adaptive FV p_min", ylabel="zero-P fraction")
+    axes[1, 2].scatter(p_dense_min, zero_fraction, s=4, alpha=0.35)
+    axes[1, 2].set(xscale="log", xlabel="adaptive dense-zone front", ylabel="zero-P fraction")
     for axis in axes.ravel():
         axis.grid(alpha=0.25)
     fig.savefig(output_path, dpi=150)
@@ -375,7 +403,7 @@ def analyze_fv_dataset(config_path="run_configs/fv_dataset.json"):
     output = config.get("analytics_output", run_dir / "analytics.json")
     plot = config.get("analytics_plot", run_dir / "coverage.png")
     summary = summarize_fv_dataset(dataset)
-    for key in ("cases", "grid_shape", "points", "p_min_range",
+    for key in ("cases", "grid_shape", "points", "p_dense_min_range",
                 "probability_range", "average_case_runtime_seconds"):
         print(f"{key}: {summary[key]}")
     if output:
