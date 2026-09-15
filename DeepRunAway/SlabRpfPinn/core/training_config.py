@@ -1,4 +1,9 @@
-"""Hierarchical configuration schema for all neural-network training modes."""
+"""Validated training configuration shared by model, PDE, and artifact code.
+
+JSON values are grouped by concern here so kernels can use one immutable
+object. Validation belongs beside the fields it protects; legacy flat JSON is
+accepted only through the compatibility adapter at the bottom of this file.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +12,7 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class PinnDomain:
+    """Physical bounds mapped from normalized model coordinates in ``[0, 1]``."""
     p_min: float
     p_max: float
     B_T: float
@@ -27,6 +33,7 @@ class PinnDomain:
 
 @dataclass(frozen=True)
 class ModelConfig:
+    """MLP or DeepONet architecture and probability-output transform."""
     model_type: str = "mlp"
     width: int = 32
     depth: int = 3
@@ -52,6 +59,7 @@ class ModelConfig:
 
 @dataclass(frozen=True)
 class LossConfig:
+    """Enabled objective terms, weights, and stabilized PDE residual settings."""
     enable_data: bool = True
     enable_pde: bool = True
     enable_threshold_pde: bool = True
@@ -84,6 +92,7 @@ class LossConfig:
 
 @dataclass(frozen=True)
 class OptimizerConfig:
+    """SOAP training settings and optional SSBroyden refinement parameters."""
     steps: int = 1000
     learning_rate: float = 3.0e-3
     learning_rate_schedule: str = "constant"
@@ -132,6 +141,7 @@ class OptimizerConfig:
 
 @dataclass(frozen=True)
 class DataConfig:
+    """Case split and point-sampling settings for supervised or physics data."""
     train_case_fraction: float = 0.8
     train_points: int = 200000
     test_points: int = 100000
@@ -146,6 +156,7 @@ class DataConfig:
 
 @dataclass(frozen=True)
 class CollocationConfig:
+    """Counts for interior, threshold, low-momentum, and high-momentum samples."""
     pde_points: int = 200000
     threshold_points: int = 100000
     threshold_band_width: float = 0.02
@@ -163,6 +174,7 @@ class CollocationConfig:
 
 @dataclass(frozen=True)
 class ActiveConfig:
+    """Residual-guided CPU-FV acquisition settings for physics training cycles."""
     enabled: bool = False
     cycles: int = 2
     dense_points: int = 131072
@@ -191,6 +203,7 @@ class ActiveConfig:
 
 @dataclass(frozen=True)
 class SsbroydenConfig:
+    """Switch for post-SOAP SSBroyden refinement."""
     enabled: bool = False
 
 
@@ -227,7 +240,8 @@ class TrainingConfig:
         return self.domain.momentum_sampling
 
     def __getattr__(self, name):
-        # Training kernels use flat attribute access; the schema remains nested.
+        # Kernels keep flat attribute access while JSON remains grouped by
+        # concern. Missing names must still raise normal AttributeError.
         for section in (self.model, self.loss, self.optimizer, self.data):
             if hasattr(section, name):
                 return getattr(section, name)
@@ -238,7 +252,7 @@ PinnConfig = TrainingConfig
 
 
 def _legacy_sections(run_config):
-    """Translate the pre-hierarchical JSON form during migration."""
+    """Partition legacy flat fields into model, loss, and optimizer sections."""
     flat = dict(run_config.get("pinn_config", {}))
     model_keys = {
         "model_type", "width", "depth", "latent_width", "branch_width",
@@ -258,7 +272,7 @@ def _legacy_sections(run_config):
 
 
 def make_pinn_config(run_config):
-    """Build the hierarchical schema from the active JSON configuration."""
+    """Build schema from JSON, preferring hierarchical sections over legacy ones."""
     legacy_model, legacy_loss, legacy_optimizer = _legacy_sections(run_config)
     model = dict(run_config.get("model", legacy_model))
     loss = dict(run_config.get("loss", legacy_loss))

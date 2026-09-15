@@ -16,6 +16,7 @@ CONFIG_PATH = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("run_configs/trai
 
 
 def launch_distributed(mode):
+    """Launch one synchronized GPU process per node for supported train modes."""
     nodes = int(os.environ.get("SLURM_JOB_NUM_NODES", "1"))
     if (nodes <= 1 or "SLURM_PROCID" in os.environ
             or mode not in ("data", "physics")):
@@ -42,6 +43,8 @@ def launch_distributed(mode):
 
 
 if __name__ == "__main__":
+    # Root driver stays config-only. It dispatches mode and lets rank 0 write
+    # plots and terminal failure status for the shared run.
     config = json.loads(CONFIG_PATH.read_text())
     mode = config.get("mode", "data")
     if launch_distributed(mode):

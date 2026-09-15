@@ -1,4 +1,9 @@
-"""Shared data, physics, SOAP, SSBroyden, and active training loops."""
+"""Shared data, physics, SOAP, SSBroyden, and active training loops.
+
+Training kernels use FP64 JAX arrays. FV labels stay on the host and outside
+automatic differentiation. Distributed paths use one JAX process per node;
+rank 0 owns final artifacts and synchronization protects shared files.
+"""
 
 from concurrent.futures import ThreadPoolExecutor
 import json
@@ -69,10 +74,12 @@ def _shard_with_mask(values, devices, valid_count=None):
 
 
 def _unreplicate(tree):
+    """Take the first value from each single-device replica."""
     return jax.tree_util.tree_map(lambda value: value[0], tree)
 
 
 def _soap_optimizer(config):
+    """Build SOAP with configured learning-rate schedule and preconditioning."""
     import optax
     from soap_jax import soap
     learning_rate = config.learning_rate
@@ -142,6 +149,7 @@ def _shard_leading(values, devices):
 
 
 def _grouped_deeponet_mse(params, data, *, max_cases=None, transform=None):
+    """Compute MSE over valid cells, excluding padded grouped-case entries."""
     if transform is None:
         transform = OUTPUT_TRANSFORMS["sigmoid"]
     if max_cases is not None:
@@ -173,7 +181,7 @@ def _grouped_deeponet_metrics(params, train_data, test_data,
 
 def train_supervised_deeponet(train_data, test_data, *, config, distributed=False,
                               checkpoint_callback=None, global_case_count=None):
-    """Train DeepONet directly from grouped case tensors."""
+    """Train DeepONet from grouped cases with global batch semantics."""
     devices = _training_devices(config.n_devices)
     local_devices = len(devices)
     process_count = jax.process_count() if distributed else 1
@@ -293,6 +301,7 @@ class _GroupedPointSampler:
         self.rng = np.random.default_rng(seed)
 
     def next(self, size):
+        """Sample cases uniformly, then sample only valid cells in each case."""
         case_ids = self.rng.integers(0, self.n_cases, size=size)
         point_ids = (self.rng.random(size) * self.counts[case_ids]).astype(np.int64)
         trunk = self.data["trunk"][case_ids, point_ids]
@@ -304,7 +313,7 @@ class _GroupedPointSampler:
 
 def train_supervised_mlp_grouped(train_data, test_data, *, config,
                                  distributed=False, checkpoint_callback=None):
-    """Train pointwise MLP from grouped FV data without flattening all cells."""
+    """Train pointwise MLP without flattening all grouped FV cells."""
     devices = _training_devices(config.n_devices)
     process_count = jax.process_count() if distributed else 1
     n_devices = jax.device_count() if distributed else len(devices)
@@ -406,6 +415,7 @@ def _train_physics_multi(z_data, y_data, z_pde, z_bc, *, domain, config,
                          z_pde_threshold=None, z_low=None,
                          initial_params=None, checkpoint_callback=None,
                          distributed=False):
+    """Run masked physics loss across local devices and optional JAX hosts."""
     devices = _training_devices(config.n_devices)
     local_device_count = len(devices)
     process_count = jax.process_count() if distributed else 1
@@ -488,6 +498,8 @@ def _train_physics_multi(z_data, y_data, z_pde, z_bc, *, domain, config,
             return jnp.sum(mask * values * values) * n_devices / jnp.maximum(count, 1.0)
 
         def loss_fn(params):
+            # Masks remove padded samples. The threshold term intentionally
+            # uses the PDE weight because it is a PDE residual subset.
             data_loss = (scaled_mse(probability_fn(params, zd) - yd, md)
                          if config.enable_data else jnp.asarray(0.0, jnp.float64))
             pde_loss = (scaled_mse(residual_fn(params, zp, cp), mp)
@@ -585,7 +597,7 @@ def train_physics_informed(z_data, y_data, z_pde, z_bc, *, domain,
                            config=None, z_pde_threshold=None, z_low=None,
                            initial_params=None, checkpoint_callback=None,
                            distributed=False):
-    """Train FC PINN with FV data, PDE residual, and successful-pmax BC."""
+    """Train PINN with data, PDE, threshold, low-p, and high-p boundary terms."""
     config = PinnConfig() if config is None else config
     if distributed or config.n_devices != 1 or config.batch_size > 0:
         return _train_physics_multi(
@@ -631,6 +643,8 @@ def train_physics_informed(z_data, y_data, z_pde, z_bc, *, domain,
     @jax.jit
     def step(params, opt_state, zd, yd, zp, cb, zt, ct, zl, zb, yb):
         def loss_fn(params):
+            # ``yb`` is a binary high-momentum success target. Low-p uses a
+            # zero target, while PDE terms use the same relative residual.
             data_loss = (jnp.mean((probability_fn(params, zd) - yd) ** 2)
                          if config.enable_data else jnp.asarray(0.0, dtype=jnp.float64))
             pde_loss = (jnp.mean(residual_fn(params, zp, cb) ** 2)
@@ -701,6 +715,7 @@ def train_physics_active(z_data, y_data, z_pde, z_bc, *, domain,
     histories = []
     records = []
     for cycle in range(cycles):
+        # Checkpoint steps include prior cycles so filenames remain unique.
         def cycle_checkpoint(step, cycle_params, *, cycle_number=cycle):
             if checkpoint_callback is not None:
                 checkpoint_callback(cycle_number * config.steps + step,
@@ -733,6 +748,8 @@ def train_physics_active(z_data, y_data, z_pde, z_bc, *, domain,
             coeff_norm=config.residual_coeff_norm,
             residual_floor=config.residual_floor)
         score = np.abs(np.asarray(residual, dtype=np.float64))
+        # Rank absolute residuals on host. FV acquisition remains a normal
+        # Python callback and therefore cannot enter JAX's differentiation.
         score[~np.isfinite(score)] = -np.inf
         count = min(acquire_points, len(candidates))
         selected = np.argpartition(score, -count)[-count:]
@@ -767,7 +784,7 @@ def train_physics_active(z_data, y_data, z_pde, z_bc, *, domain,
 
 def exact_deeponet_inputs(cases, results, parameter_domain, domain,
                           max_points=None):
-    """Build grouped normalized DeepONet tensors directly from FV cases."""
+    """Build padded groups with six-parameter branch and two-coordinate trunk."""
     cases = np.asarray(cases, dtype=np.float64)
     if len(cases) != len(results) or len(cases) == 0:
         raise ValueError("cases and FV results must have equal nonzero length")
@@ -807,7 +824,7 @@ def exact_deeponet_inputs(cases, results, parameter_domain, domain,
 
 
 def grouped_to_pointwise(data):
-    """Flatten grouped case tensors into exact pointwise model inputs."""
+    """Flatten groups into ``[p, xi, six parameters]`` pointwise inputs."""
     z_parts, y_parts = [], []
     for index in range(data["branch"].shape[0]):
         valid = np.asarray(data["mask"][index]) > 0.0
@@ -824,7 +841,7 @@ def grouped_to_pointwise(data):
 def train_ssbroyden(params, z_data, y_data, z_pde, z_bc, *, domain,
                     config=None, z_pde_threshold=None, z_low=None,
                     checkpoint_callback=None, step_offset=0):
-    """Refine PINN with blockwise full-batch SSBroyden."""
+    """Refine PINN with blockwise full-batch SSBroyden and monotonic acceptance."""
     import equinox as eqx
     import optimistix as optx
 
@@ -962,13 +979,15 @@ def detect_local_gpu_count():
 
 
 def initialize_slurm_jax(local_gpu_count):
-    """Initialize multi-host JAX collectives for an srun step."""
+    """Initialize multi-host JAX using one task per node and shared networking."""
     if "SLURM_PROCID" not in os.environ:
         return
     process_count = int(os.environ.get("SLURM_NTASKS", "1"))
     process_id = int(os.environ.get("SLURM_PROCID", "0"))
     if process_count <= 1:
         return
+    # The first allocated host coordinates all processes. Slurm must expose
+    # hostnames, DNS, and a reachable port selected from the job ID.
     hosts = subprocess.check_output(
         ["scontrol", "show", "hostnames", os.environ["SLURM_JOB_NODELIST"]],
         text=True).splitlines()
@@ -984,6 +1003,7 @@ def initialize_slurm_jax(local_gpu_count):
 
 
 def _split_cases(cases, results, train_fraction, seed):
+    """Split complete cases with a seeded permutation, never individual cells."""
     permutation = np.random.default_rng(seed).permutation(len(cases))
     n_train = min(max(1, int(round(train_fraction * len(cases)))), len(cases) - 1)
     train_ids = np.sort(permutation[:n_train])
@@ -994,7 +1014,7 @@ def _split_cases(cases, results, train_fraction, seed):
 
 def train_data_from_config(config_path=Path("run_configs/train.json"),
                            run_config=None):
-    """Config-driven data/DeepONet training orchestration."""
+    """Validate data, train model, and publish rank-0 artifacts."""
     from core.fv_dataset import load_fv_cases
     from core.training_artifacts import (
         atomic_write_json, begin_run, distributed_file_barrier,
@@ -1151,6 +1171,7 @@ def train_data_from_config(config_path=Path("run_configs/train.json"),
 
 
 def _normalize_parameter_cases(cases, parameter_domain):
+    """Map physical six-parameter cases into normalized branch coordinates."""
     cases = np.asarray(cases, dtype=np.float64)
     normalized = np.empty_like(cases)
     for column, (lo, hi, scale) in enumerate(parameter_domain.values()):
@@ -1161,7 +1182,10 @@ def _normalize_parameter_cases(cases, parameter_domain):
 
 
 def _build_physics_inputs(dataset, cases, parameter_domain, domain):
+    """Convert exact FV cells into normalized eight-coordinate PINN samples."""
     from core.fv_dataset import flatten_fv_dataset
+    # Flattening preserves exact FV cell order; only coordinate normalization
+    # changes before values enter the PINN.
     flat = flatten_fv_dataset(dataset)
     case_index = np.asarray(flat["case_index"], dtype=np.int64)
     p = np.asarray(flat["p"], dtype=np.float64)
@@ -1177,7 +1201,7 @@ def _build_physics_inputs(dataset, cases, parameter_domain, domain):
 
 def train_physics_from_config(config_path=Path("run_configs/train.json"),
                               config=None):
-    """Config-driven physics-informed training orchestration."""
+    """Build collocation inputs, run physics phases, and publish artifacts."""
     from core.fv_dataset import (
         coarsen_fv_cases, denormalize_parameter_cases, load_fv_dataset,
         generate_cpu_cases,
@@ -1288,6 +1312,8 @@ def train_physics_from_config(config_path=Path("run_configs/train.json"),
         active_records = []
         active_cycles = int(active.get("cycles", 1))
         if active.get("enabled", False):
+            # Active acquisition performs CPU FV solves between JAX training
+            # cycles and is intentionally limited to one JAX process.
             if jax.process_count() > 1:
                 raise RuntimeError("active FV acquisition requires one JAX process")
             def acquire_data(z_selected):

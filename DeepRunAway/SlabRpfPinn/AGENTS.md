@@ -1,7 +1,7 @@
 # Codex instructions for SlabRpfPinn
 
-Read [`docs/PROJECT_CONTEXT.md`](docs/PROJECT_CONTEXT.md) first: monorepo
-context, local-vs-remote-HPC execution split, and self-contained `./.venv`.
+Read `README.md` first, then relevant files: monorepo context,
+local-vs-remote-HPC execution split, and self-contained `./.venv`.
 
 ## Mission
 
@@ -26,8 +26,8 @@ solver correctness, FP64, and reproducibility as first-class requirements.
 
 ## Context and token discipline
 
-- Read `docs/PROJECT_CONTEXT.md`, then `README.md`, then the relevant
-  documentation in `docs/`, followed by the relevant config/code; read large
+- Read `README.md`, then relevant documentation in `docs/`, followed by the
+  relevant config/code; read large
   data, generated output, and reference documents only when the task requires
   them.
 - Search symbols and call sites before opening whole files.
@@ -91,7 +91,7 @@ See [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md) before editing
 
 Self-contained `./.venv` inside this directory, on the local machine and on
 every HPC cluster. Never activate an environment outside `SlabRpfPinn/`. See
-`docs/PROJECT_CONTEXT.md` and `docs/DEPENDENCIES.md` for install steps and the
+`docs/DEPENDENCIES.md` for install steps and the
 `jax[cuda13]` requirement on HPC.
 
 ## Configuration contract

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Generate one deterministic FV dataset across an existing Slurm allocation."""
+"""Generate one deterministic FV dataset across an existing Slurm allocation.
+
+Use one process per node and a shared work directory. Rank 0 owns the Sobol
+stream, acceptance order, final dataset publication, and completion manifest.
+"""
 
 from __future__ import annotations
 
@@ -27,6 +31,7 @@ from core.training_artifacts import (
 
 
 def _barrier(work_dir, label, rank, world, timeout_seconds=7200.0):
+    """Synchronize ranks with shared marker files and propagate rank failures."""
     marker = work_dir / f"{label}.rank{rank}"
     deadline = time.monotonic() + timeout_seconds
     while True:
@@ -53,6 +58,7 @@ def _barrier(work_dir, label, rank, world, timeout_seconds=7200.0):
 
 
 def _merge_round(work_dir, round_number, world):
+    """Merge rank files in deterministic candidate order for this round."""
     records = []
     rank_records = []
     for rank in range(world):
@@ -67,6 +73,7 @@ def _merge_round(work_dir, round_number, world):
 
 
 def _main(config_path):
+    """Run oversampled FV rounds until rank 0 accepts the requested case count."""
     with Path(config_path).open() as stream:
         run_config = json.load(stream)
     parameter_domain = run_config["parameter_domain"]
@@ -85,6 +92,8 @@ def _main(config_path):
         raise ValueError(f"invalid Slurm rank {rank} for world size {world}")
     allocated_cpus = os.environ.get("SLURM_CPUS_PER_TASK")
     allocated_count = int(allocated_cpus) if allocated_cpus else None
+    # Half the allocated CPUs leaves headroom for the rank and sparse solver;
+    # explicit worker counts remain bounded by Slurm's CPU allocation.
     worker_count = dataset_config["n_jobs"]
     if worker_count == -1 and allocated_count is not None:
         worker_count = max(1, allocated_count // 2)
@@ -105,6 +114,8 @@ def _main(config_path):
               f"target cases: {dataset_config['n_cases']}", flush=True)
     _barrier(work_dir, "workdir-ready", rank, world)
 
+    # Only rank 0 advances Sobol state. Other ranks receive exact candidate
+    # files, which keeps a multi-node run reproducible.
     engine = qmc.Sobol(d=6, scramble=True, seed=dataset_config["seed"]) if rank == 0 else None
     accepted_cases = []
     accepted_results = []
@@ -112,11 +123,15 @@ def _main(config_path):
     while True:
         remaining = (dataset_config["n_cases"] - len(accepted_results)
                      if rank == 0 else dataset_config["n_cases"])
+        # Oversampling compensates for trivial-zero and invalid FV cases. The
+        # rounded count gives every rank the same number of candidates.
         candidate_count = max(world, int(np.ceil(
             candidate_oversample * remaining)))
         candidate_count = ((candidate_count + world - 1) // world) * world
         candidate_path = work_dir / f"candidates.round{round_number}.npy"
         if rank == 0:
+            # Acceptance order follows the deterministic rank-interleaved
+            # candidate order, independent of worker completion timing.
             print(f"FV round {round_number}: solving {candidate_count} candidates; "
                   f"accepted {dataset_config['n_cases'] - remaining}/"
                   f"{dataset_config['n_cases']}", flush=True)
@@ -164,6 +179,8 @@ def _main(config_path):
         round_number += 1
 
     if rank == 0:
+        # Publish only after all accepted cases exist. The manifest checksum
+        # then covers the complete dataset artifact.
         output_path.parent.mkdir(parents=True, exist_ok=True)
         dataset_format = run_config.get("dataset_format", "npz")
         if dataset_format == "directory":

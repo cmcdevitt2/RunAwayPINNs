@@ -12,10 +12,12 @@ import uuid
 
 
 def utc_now():
+    """Return an unambiguous UTC timestamp for manifests and barriers."""
     return datetime.now(timezone.utc).isoformat()
 
 
 def atomic_write_json(path, payload):
+    """Write JSON through a same-directory temporary file and atomic replace."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(
@@ -25,10 +27,12 @@ def atomic_write_json(path, payload):
 
 
 def atomic_replace(source, destination):
+    """Atomically replace destination; both paths must share a filesystem."""
     os.replace(Path(source), Path(destination))
 
 
 def atomic_write_npy(path, array):
+    """Write a pickle-disabled NumPy array atomically."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(
@@ -39,6 +43,7 @@ def atomic_write_npy(path, array):
 
 
 def sha256_file(path, chunk_size=1024 * 1024):
+    """Hash file bytes in bounded chunks for manifest checksums."""
     digest = hashlib.sha256()
     with Path(path).open("rb") as stream:
         for chunk in iter(lambda: stream.read(chunk_size), b""):
@@ -47,6 +52,7 @@ def sha256_file(path, chunk_size=1024 * 1024):
 
 
 def sha256_path(path):
+    """Hash one file or a directory's sorted relative paths and file bytes."""
     path = Path(path)
     if path.is_file():
         return sha256_file(path)
@@ -65,6 +71,7 @@ def sha256_path(path):
 def validate_dataset_manifest(dataset_path, manifest_path, *, verify_file=True,
                               expected_config=None,
                               expected_dataset_config=None):
+    """Validate dataset completion, path, compatibility, and checksum invariants."""
     dataset_path = Path(dataset_path).resolve()
     manifest = json.loads(Path(manifest_path).read_text())
     if manifest.get("status") != "complete":
@@ -96,6 +103,7 @@ def validate_dataset_manifest(dataset_path, manifest_path, *, verify_file=True,
 
 
 def validate_model_manifest(model_path, manifest_path):
+    """Validate model completion, recorded path, and model checksum."""
     model_path = Path(model_path).resolve()
     manifest = json.loads(Path(manifest_path).read_text())
     if manifest.get("status") != "complete":
@@ -115,6 +123,7 @@ def validate_model_manifest(model_path, manifest_path):
 
 
 def slurm_context():
+    """Capture reproducibility-relevant Slurm variables without requiring Slurm."""
     names = (
         "SLURM_JOB_ID", "SLURM_JOB_NODELIST", "SLURM_NTASKS",
         "SLURM_PROCID", "SLURM_LOCALID", "SLURM_CPUS_PER_TASK",
@@ -124,6 +133,7 @@ def slurm_context():
 
 
 def distributed_file_barrier(directory, label, rank, world, timeout_seconds=7200.0):
+    """Synchronize ranks through shared markers and fail fast on failure markers."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     atomic_write_json(directory / f"{label}.rank{rank}.json", {
@@ -142,6 +152,7 @@ def distributed_file_barrier(directory, label, rank, world, timeout_seconds=7200
 
 
 def begin_run(run_dir, kind, config, *, inputs=None):
+    """Create a fresh running manifest; reject non-empty run directories."""
     run_dir = Path(run_dir)
     if run_dir.exists() and any(run_dir.iterdir()):
         raise FileExistsError(
@@ -156,6 +167,7 @@ def begin_run(run_dir, kind, config, *, inputs=None):
 
 
 def finish_run(manifest_path, *, status, artifacts=None, **extra):
+    """Atomically set terminal manifest state while preserving idempotence."""
     manifest_path = Path(manifest_path)
     payload = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
     if payload.get("status") in ("complete", "failed"):
@@ -253,7 +265,7 @@ def ensure_training_output_dir(output_dir):
 
 
 def make_checkpoint_callback(checkpoint_dir, save_model, *, enabled=True):
-    """Return atomic parameter-snapshot callback."""
+    """Return atomic parameter-snapshot callback owned by the calling rank."""
     checkpoint_dir = Path(checkpoint_dir)
 
     if not enabled:
@@ -276,7 +288,7 @@ def make_checkpoint_callback(checkpoint_dir, save_model, *, enabled=True):
 
 def write_training_outputs(output_dir, params, save_model, *, run_config,
                            metadata, summary, loss_history):
-    """Persist final model, metadata, summary, and explicit loss history."""
+    """Persist fixed final artifacts after enforcing a fresh output directory."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     final_names = (

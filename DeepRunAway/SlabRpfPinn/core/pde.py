@@ -1,4 +1,10 @@
-"""PDE coefficients, residuals, boundaries, and collocation sampling."""
+"""PDE coefficients, residuals, boundaries, and collocation sampling.
+
+Model inputs stay normalized to ``[0, 1]^8``. The first two coordinates are
+momentum and ``xi``; the remaining six are ``E/Ec, Te_eV, nD_m3, nNe_m3,
+zD, zNe``. Physical derivatives are converted through the selected momentum
+mapping before residual evaluation.
+"""
 
 from __future__ import annotations
 
@@ -30,6 +36,7 @@ NE_ABAR = _table(HESSLOW_ABAR_BY_Z[10], 0.0)
 
 
 def _transform_angular_sampling(points: np.ndarray, angular_sampling: str):
+    """Map uniform-theta Sobol samples to normalized ``xi`` coordinates in [0, 1]."""
     if angular_sampling == "xi":
         return points
     if angular_sampling == "theta":
@@ -41,6 +48,7 @@ def _transform_angular_sampling(points: np.ndarray, angular_sampling: str):
 
 def normalize_momentum(p, p_min: float, p_max: float,
                        momentum_sampling: str = "log"):
+    """Map positive physical momentum to normalized linear or logarithmic space."""
     if momentum_sampling == "log":
         return (np.log(p) - np.log(p_min)) / np.log(p_max / p_min)
     if momentum_sampling == "linear":
@@ -50,6 +58,7 @@ def normalize_momentum(p, p_min: float, p_max: float,
 
 def sobol_8d(n_points: int, seed: int = 0, *, angular_sampling: str = "xi",
              momentum_sampling: str = "log") -> np.ndarray:
+    """Generate reproducible normalized eight-coordinate Sobol samples."""
     if n_points <= 0:
         return np.empty((0, 8), dtype=np.float64)
     if momentum_sampling not in ("log", "linear"):
@@ -66,6 +75,7 @@ def _map_unit(u, lo, hi, scale):
 
 
 def split_inputs(z, domain: PinnDomain):
+    """Split inputs into physical momentum, pitch cosine, and plasma values."""
     p = (jnp.exp(jnp.log(domain.p_min)
          + z[..., 0] * jnp.log(domain.p_max / domain.p_min))
          if domain.momentum_sampling == "log"
@@ -81,17 +91,22 @@ def split_inputs(z, domain: PinnDomain):
 
 
 def charge_weights(zavg, Z):
+    """Return piecewise-linear weights for neighboring integer charge states."""
     q = jnp.arange(Z + 1, dtype=jnp.float64)
     return jnp.maximum(0.0, 1.0 - jnp.abs(jnp.asarray(zavg)[..., None] - q))
 
 
 def collision_coefficients(p, te_eV, nD, nNe, zD, zNe, B_T):
+    """Compute normalized friction, angular diffusion, and synchrotron scale."""
     qD = jnp.arange(2, dtype=jnp.float64)
     qNe = jnp.arange(11, dtype=jnp.float64)
     wD = charge_weights(zD, 1)
     wNe = charge_weights(zNe, 10)
     nD = jnp.asarray(nD)
     nNe = jnp.asarray(nNe)
+    # State order must match the CPU reference: D charge states, then Ne
+    # charge states. Charge-state weights preserve each element's total ion
+    # density while allowing continuous mean-charge parameters.
     n_state = jnp.concatenate([nD[..., None] * wD, nNe[..., None] * wNe], axis=-1)
     q_state = jnp.concatenate([qD, qNe])
     Z_nuc = jnp.concatenate([jnp.ones(2), jnp.full(11, 10.0)])
@@ -140,6 +155,7 @@ def sobol_8d_nontrivial(n_points: int, domain: PinnDomain, seed: int = 0, *,
                          angular_sampling: str = "xi",
                          momentum_sampling: str = "log",
                          batch_size: int = 32768) -> np.ndarray:
+    """Sample cases with positive drift at the successful ``p_max, xi=-1`` boundary."""
     if n_points <= 0:
         return np.empty((0, 8), dtype=np.float64)
     engine = qmc.Sobol(d=8, scramble=True, seed=seed)
@@ -177,6 +193,7 @@ def sobol_6d(n_points: int, seed: int = 0) -> np.ndarray:
 def sobol_pmax_boundary_nontrivial(n_points: int, domain: PinnDomain,
                                    seed: int = 0, *,
                                    angular_sampling: str = "xi") -> np.ndarray:
+    """Return normalized samples fixed to the upper-momentum boundary."""
     z = sobol_8d_nontrivial(
         n_points, domain, seed, angular_sampling=angular_sampling,
         momentum_sampling=domain.momentum_sampling)
@@ -187,6 +204,7 @@ def sobol_pmax_boundary_nontrivial(n_points: int, domain: PinnDomain,
 def sobol_plow_boundary_nontrivial(n_points: int, domain: PinnDomain,
                                    seed: int = 0, *,
                                    angular_sampling: str = "xi") -> np.ndarray:
+    """Return normalized samples fixed to the lower-momentum boundary."""
     z = sobol_8d_nontrivial(
         n_points, domain, seed, angular_sampling=angular_sampling,
         momentum_sampling=domain.momentum_sampling)
@@ -197,6 +215,7 @@ def sobol_plow_boundary_nontrivial(n_points: int, domain: PinnDomain,
 def analytic_threshold_collocation(n_points: int, domain: PinnDomain, *,
                                    seed: int = 0, band_width: float = 0.02,
                                    batch_size: int = 32768) -> np.ndarray:
+    """Sample a band around the analytic physical ``U_p=0`` threshold curve."""
     if n_points <= 0:
         return np.empty((0, 8), dtype=np.float64)
     if not 0.0 < band_width < 1.0:
@@ -245,6 +264,7 @@ def analytic_threshold_collocation(n_points: int, domain: PinnDomain, *,
 
 
 def drift_up(z, domain: PinnDomain):
+    """Return normalized radial drift ``U_p``; positive means outward motion."""
     p, xi, ebar, te, nD, nNe, zD, zNe = split_inputs(z, domain)
     cf, _, alpha = collision_coefficients(p, te, nD, nNe, zD, zNe, domain.B_T)
     gamma = jnp.sqrt(1.0 + p * p)
@@ -269,10 +289,13 @@ def rescale_coefficients(coefficients, cf, ebar, coeff_norm="cf_ebar"):
 
 
 def pde_coefficients(z, domain: PinnDomain, coeff_norm: str = "cf_ebar"):
+    """Return normalized coefficients for p, xi, and second-xi derivatives."""
     p, xi, ebar, te, nD, nNe, zD, zNe = split_inputs(z, domain)
     cf, nud, alpha = collision_coefficients(p, te, nD, nNe, zD, zNe, domain.B_T)
     gamma = jnp.sqrt(1.0 + p * p)
     up = -ebar * xi - cf - alpha * gamma * p * (1.0 - xi * xi)
+    # Chain rule converts derivatives in normalized momentum to derivatives
+    # in physical momentum. This factor is required, not a tunable loss scale.
     dp_dpnorm = (p * jnp.log(domain.p_max / domain.p_min)
                  if domain.momentum_sampling == "log"
                  else jnp.asarray(domain.p_max - domain.p_min, dtype=jnp.float64))
@@ -284,6 +307,7 @@ def pde_coefficients(z, domain: PinnDomain, coeff_norm: str = "cf_ebar"):
 
 
 def residual_single(params, z, coefficients, probability_fn, residual_floor=0.1):
+    """Evaluate stabilized relative PDE residual using phase-space autodiff."""
     phase = z[:2]
     def probability_phase(q):
         zz = z.at[0].set(q[0]).at[1].set(q[1])
@@ -301,6 +325,7 @@ def residual_single(params, z, coefficients, probability_fn, residual_floor=0.1)
 
 def make_pde_functions(domain: PinnDomain, *, probability_fn=None,
                        coeff_norm: str = "cf_ebar", residual_floor: float = 0.1):
+    """Build JIT/VMap coefficient and residual functions for one domain."""
     if probability_fn is None:
         from core.model import probability as probability_fn
     coefficients = jax.jit(jax.vmap(
@@ -315,6 +340,7 @@ def make_pde_functions(domain: PinnDomain, *, probability_fn=None,
 def evaluate_pde_residuals(params, z, domain: PinnDomain, *, chunk_size=65536,
                            probability_fn=None, coeff_norm: str = "cf_ebar",
                            residual_floor: float = 0.1):
+    """Evaluate residuals in bounded host/device chunks, preserving input order."""
     z = np.asarray(z, dtype=np.float64)
     coeff_fn, residual_fn = make_pde_functions(
         domain, probability_fn=probability_fn, coeff_norm=coeff_norm,
@@ -328,6 +354,7 @@ def evaluate_pde_residuals(params, z, domain: PinnDomain, *, chunk_size=65536,
 
 
 def success_boundary_target(z, domain: PinnDomain):
+    """Return binary success targets where upper-boundary drift points outward."""
     p = jnp.asarray(domain.p_max, dtype=jnp.float64)
     xi = -1.0 + 2.0 * z[..., 1]
     ebar = _map_unit(z[..., 2], domain.ebar_min, domain.ebar_max, "log")

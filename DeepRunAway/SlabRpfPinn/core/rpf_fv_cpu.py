@@ -1,8 +1,9 @@
 """CPU finite-volume reference operators for the relativistic FP equation.
 
-Notebook and production GPU code should use these functions as a transparent
-CPU reference. State vectors contain cell-average distribution values, ordered
-by ``i * N_xi + j``. The physical adjoint uses the cell-volume inner product.
+All momentum values are dimensionless, with ``p = p_physical / (m_e c)``.
+Angles use ``theta`` in radians and ``xi = cos(theta)``. State vectors contain
+cell-average distribution values ordered by ``i * N_xi + j``. The physical
+adjoint uses the cell-volume inner product, so it is not a plain transpose.
 """
 
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ MEAN_EXCITATION_EV_BY_Z = {
 
 @dataclass(frozen=True)
 class GridConfig:
+    """Logarithmic momentum and uniform-theta grid specification."""
     p_min: float = 0.1
     p_max: float = 100.0
     N_p: int = 1024
@@ -37,6 +39,7 @@ class GridConfig:
 
 @dataclass(frozen=True)
 class IonSpecies:
+    """Ion charge-state data; densities are in m^-3 and energies in eV."""
     Z: int
     n: np.ndarray
     I_eV: np.ndarray
@@ -45,6 +48,7 @@ class IonSpecies:
 
 @dataclass(frozen=True)
 class PlasmaConfig:
+    """Physical plasma inputs: temperature [eV], electric field [V/m], B [T]."""
     T_e_eV: float
     E_parallel: float
     B: float
@@ -53,6 +57,7 @@ class PlasmaConfig:
 
 @dataclass(frozen=True)
 class Grid:
+    """FV faces, centers, spacings, and cell volumes in solver ordering."""
     p_face: np.ndarray
     p_center: np.ndarray
     xi_face: np.ndarray
@@ -66,6 +71,7 @@ class Grid:
 
 @dataclass(frozen=True)
 class DerivedPlasma:
+    """Derived plasma densities, timescales, and dimensionless collision scales."""
     n_e: float
     Z_eff: float
     Theta: float
@@ -78,6 +84,7 @@ class DerivedPlasma:
 
 @dataclass(frozen=True)
 class CollisionData:
+    """Face radial coefficients and cell-center angular scattering rates."""
     C_F_face: np.ndarray
     C_A_face: np.ndarray
     nu_D_center: np.ndarray
@@ -100,12 +107,14 @@ def ion_species_from_charge_state_densities(Z: int, densities) -> IonSpecies:
 
 
 def build_grid(cfg: GridConfig) -> Grid:
+    """Build a log-p grid and a uniform-theta grid represented in xi order."""
     if cfg.p_min <= 0 or cfg.p_max <= cfg.p_min:
         raise ValueError("logarithmic momentum grid requires 0 < p_min < p_max")
     p_face = np.geomspace(cfg.p_min, cfg.p_max, cfg.N_p + 1)
     if cfg.theta_min < 0 or cfg.theta_max <= cfg.theta_min or cfg.theta_max > np.pi:
         raise ValueError("theta grid must satisfy 0 <= theta_min < theta_max <= pi")
     theta_face = np.linspace(cfg.theta_min, cfg.theta_max, cfg.N_xi + 1)
+    # Reverse cosine values so xi increases from -1 to +1.
     xi_face = np.cos(theta_face[::-1])
     # Geometric centers align with logarithmic momentum cells.
     p_center = np.sqrt(p_face[:-1] * p_face[1:])
@@ -120,6 +129,7 @@ def build_grid(cfg: GridConfig) -> Grid:
     xi_face_spacing[0] = xi_center[0] - xi_face[0]
     xi_face_spacing[-1] = xi_face[-1] - xi_center[-1]
     xi_face_spacing[1:-1] = np.diff(xi_center)
+    # Integrate 2*pi*p^2 dp over each radial shell before multiplying by dxi.
     radial_volume = 2 * np.pi / 3 * (p_face[1:]**3 - p_face[:-1]**3)
     return Grid(p_face, p_center, xi_face, xi_center, p_face_spacing,
                 xi_face_spacing, xi_cell_widths, radial_volume,
@@ -127,6 +137,7 @@ def build_grid(cfg: GridConfig) -> Grid:
 
 
 def derive_plasma(cfg: PlasmaConfig) -> DerivedPlasma:
+    """Derive density, Coulomb, collision-time, and normalized-field scales."""
     n_e = sum(np.sum(np.arange(ion.Z + 1) * ion.n) for ion in cfg.ions)
     charge_square = sum(np.sum(np.arange(ion.Z + 1)**2 * ion.n) for ion in cfg.ions)
     Z_eff = charge_square / n_e
@@ -143,6 +154,7 @@ def derive_plasma(cfg: PlasmaConfig) -> DerivedPlasma:
 
 
 def collision_coefficients(p, cfg: PlasmaConfig, plasma: DerivedPlasma):
+    """Return normalized friction, radial diffusion, and angular diffusion."""
     gamma = np.sqrt(1 + p**2)
     x = p / (gamma * np.sqrt(2 * plasma.Theta))
     Phi = special.erf(x)
@@ -210,6 +222,7 @@ def momentum_from_kinetic_energy(kinetic_energy: float) -> float:
 
 
 def chang_cooper_delta(w):
+    """Evaluate Chang-Cooper face weight, including a stable small-``w`` series."""
     w = np.asarray(w, dtype=float)
     result = np.empty_like(w)
     small = np.abs(w) < 1.0e-6
@@ -219,7 +232,7 @@ def chang_cooper_delta(w):
 
 
 def chang_cooper_coefficients(A, D, dq):
-    """Return left coefficient and face-state coefficient for one FV face."""
+    """Return left/right flux coefficients; use upwind signs when ``D == 0``."""
     A, D, dq = np.broadcast_arrays(np.asarray(A, dtype=float),
                                    np.asarray(D, dtype=float),
                                    np.asarray(dq, dtype=float))
@@ -256,6 +269,7 @@ def radial_boundary_rates(grid: Grid, plasma: DerivedPlasma, coll: CollisionData
 
 
 def assemble_fp_operator(grid: Grid, plasma: DerivedPlasma, coll: CollisionData):
+    """Assemble cell-average generator ``L`` with radial and angular fluxes."""
     Np, Nxi = len(grid.p_center), len(grid.xi_center)
     M = Np * Nxi
     row = np.arange(M)
@@ -272,6 +286,8 @@ def assemble_fp_operator(grid: Grid, plasma: DerivedPlasma, coll: CollisionData)
     xi_lower = np.zeros(M)
     xi_upper = np.zeros(M)
 
+    # Each row stores five possible entries: lower-p, lower-xi, diagonal,
+    # upper-xi, and upper-p. Missing neighbors map to the diagonal column.
     lower = i > 0
     pf = grid.p_face[i[lower]]
     gammaf = np.sqrt(1.0 + pf**2)
@@ -300,6 +316,8 @@ def assemble_fp_operator(grid: Grid, plasma: DerivedPlasma, coll: CollisionData)
     diag[escape] -= escape_rate[escape]
     diag[~lower] -= failure_rate[~lower]
 
+    # Angular flux uses the same Chang-Cooper convention. Pole faces have no
+    # flux because every angular coefficient contains ``1 - xi**2``.
     lower = j > 0
     xif = grid.xi_face[j[lower]]
     A = (1.0 - xif**2) * (-plasma.E_bar / p[lower] + plasma.alpha * xif / gamma[lower])

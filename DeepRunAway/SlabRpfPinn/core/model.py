@@ -1,4 +1,9 @@
-"""MLP and DeepONet architectures plus probability-constrained prediction."""
+"""MLP and DeepONet architectures plus probability-constrained prediction.
+
+The pointwise interface is eight normalized coordinates: two phase-space
+coordinates followed by six physical-parameter coordinates. DeepONet keeps
+these groups separate as a six-coordinate branch and a two-coordinate trunk.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +22,7 @@ from core.training_config import TrainingConfig
 
 
 def _apply_mlp(params, z):
+    """Apply tanh hidden layers and one linear output layer to trailing inputs."""
     h = z
     for layer in params[:-1]:
         h = jnp.tanh(h @ layer["W"] + layer["b"])
@@ -24,6 +30,7 @@ def _apply_mlp(params, z):
 
 
 def mlp_raw(params, z):
+    """Return raw MLP output or grouped DeepONet branch/trunk contraction."""
     if isinstance(params, dict):
         branch = _apply_mlp(params["branch"], z[..., 2:])
         trunk = _apply_mlp(params["trunk"], z[..., :2])
@@ -60,6 +67,7 @@ def probability_transform(raw, z):
 
 
 def probability(params, z):
+    """Return bounded probability using the backward-compatible sigmoid transform."""
     return probability_transform(mlp_raw(params, z), z)
 
 
@@ -77,6 +85,7 @@ predict = jax.jit(probability)
 
 
 def _init_dense_mlp(key, input_dim, output_dim, width, depth):
+    """Initialize FP64 dense layers with ``depth`` hidden layers."""
     dims = [input_dim] + [width] * depth + [output_dim]
     keys = jax.random.split(key, len(dims) - 1)
     return [{
@@ -87,11 +96,13 @@ def _init_dense_mlp(key, input_dim, output_dim, width, depth):
 
 
 def init_mlp(key, width=32, depth=4):
+    """Initialize an eight-input, one-output pointwise MLP."""
     return _init_dense_mlp(key, 8, 1, width, depth)
 
 
 def init_deeponet(key, latent_width=64, branch_width=32, branch_depth=3,
                   trunk_width=32, trunk_depth=3):
+    """Initialize six-parameter branch and two-coordinate trunk networks."""
     branch_key, trunk_key = jax.random.split(key)
     return {
         "branch": _init_dense_mlp(
@@ -103,6 +114,7 @@ def init_deeponet(key, latent_width=64, branch_width=32, branch_depth=3,
 
 
 def init_model(key, config: TrainingConfig):
+    """Dispatch initialization from validated model configuration."""
     if config.model_type == "deeponet":
         return init_deeponet(
             key, latent_width=config.latent_width,
@@ -122,7 +134,7 @@ def deeponet_probability(params, branch_z, trunk_z, *, transform=_sigmoid_transf
 
 
 def save_model(path, params):
-    """Save flattened model parameters in a portable NumPy archive."""
+    """Save flattened FP64 parameters; architecture metadata is stored separately."""
     weights, _ = ravel_pytree(params)
     np.savez(path, weights=np.asarray(jax.device_get(weights), dtype=np.float64))
 
@@ -130,7 +142,7 @@ def save_model(path, params):
 def load_model(path, *, model_type="mlp", width=32, depth=4,
                latent_width=64, branch_width=32, branch_depth=3,
                trunk_width=32, trunk_depth=3):
-    """Restore flattened parameters using recorded architecture settings."""
+    """Restore parameters using an exactly matching architecture template."""
     if model_type == "deeponet":
         template = init_deeponet(
             jax.random.PRNGKey(0), latent_width=latent_width,

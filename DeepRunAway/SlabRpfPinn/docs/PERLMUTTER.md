@@ -4,8 +4,7 @@ This is the Perlmutter runbook for the current config-driven workflow. It
 does not use a notebook, GPU FV solver, cuDSS, or legacy TOML entry points.
 CPU finite-volume data generation and GPU model training are separate stages.
 The environment is the project's own `./.venv` — see
-[`DEPENDENCIES.md`](DEPENDENCIES.md) and
-[`PROJECT_CONTEXT.md`](PROJECT_CONTEXT.md). Create it once with
+[`DEPENDENCIES.md`](DEPENDENCIES.md). Create it once with
 `python -m venv .venv && pip install -r requirements.txt`, then
 `pip install "jax[cuda13]"` inside a GPU allocation before training.
 

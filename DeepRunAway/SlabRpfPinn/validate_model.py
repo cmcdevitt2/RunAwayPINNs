@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Validate saved PINN on newly sampled CPU-FV cases."""
+"""Validate saved PINN against exact CPU-FV cases and PDE residuals.
+
+The model metadata supplies architecture, domain, and residual settings. A
+saved dataset must pass its manifest checks; fresh cases use the same physical
+parameter domain and global momentum floor as training.
+"""
 
 from __future__ import annotations
 
@@ -34,6 +39,7 @@ PARAMETER_DOMAIN = {
 
 
 def regional_metrics(prediction, target):
+    """Report MSE and maximum error for zero, transition, and saturated targets."""
     target = np.asarray(target)
     error = np.asarray(prediction) - target
     masks = {
@@ -53,6 +59,7 @@ def regional_metrics(prediction, target):
 
 
 def sample_cases(n_cases, seed, parameter_domain):
+    """Generate reproducible six-parameter physical cases from scrambled Sobol points."""
     unit = sobol_6d(n_cases, seed)
     cases = np.empty_like(unit)
     for k, (lo, hi, scale) in enumerate(parameter_domain.values()):
@@ -63,6 +70,7 @@ def sample_cases(n_cases, seed, parameter_domain):
 
 def build_validation_inputs(dataset, cases, p_floor, p_max,
                             momentum_sampling, parameter_domain):
+    """Build normalized eight-coordinate inputs aligned with flattened FV values."""
     case_index = np.asarray(dataset["case_index"], dtype=np.int64)
     p = np.asarray(dataset["p"], dtype=np.float64)
     normalized = np.empty_like(cases, dtype=np.float64)
@@ -93,6 +101,7 @@ def evaluate_pde_chunked(params, z, domain, chunk_size, *, probability_fn=None,
 
 def save_validation_plots(output_base, target, prediction, error, pde,
                           case_index, results, per_case, z, domain):
+    """Save correlation and worst-case field plots with the analytic threshold overlay."""
     import matplotlib.pyplot as plt
 
     output_base = Path(output_base)
@@ -177,6 +186,7 @@ CONFIG_PATH = Path("run_configs/validate_model.json")
 
 
 def main(config_path=CONFIG_PATH):
+    """Load model metadata, validate or generate FV data, and write metrics/plots."""
     config = json.loads(Path(config_path).read_text())
     args = SimpleNamespace(
         model_dir=Path(config["model_dir"]),
@@ -196,6 +206,8 @@ def main(config_path=CONFIG_PATH):
     if args.pde_chunk <= 0:
         raise ValueError("--pde-chunk must be positive")
 
+    # Validation uses the same JAX execution path as training and currently
+    # requires visible GPUs, even though FV generation itself remains on CPU.
     if jax.default_backend() != "gpu" or not any(
         getattr(device, "platform", "") == "gpu" for device in jax.devices()
     ):
@@ -241,6 +253,8 @@ def main(config_path=CONFIG_PATH):
     domain = PinnDomain(**metadata["domain"])
     print(f"model loaded: {time.perf_counter() - timing_start:.3f} s", flush=True)
 
+    # Reuse a saved dataset only after path, compatibility, and checksum checks;
+    # otherwise generate fresh CPU-FV cases and discard trivial-zero results.
     if args.dataset_path:
         if not args.dataset_manifest:
             raise ValueError(
@@ -268,6 +282,8 @@ def main(config_path=CONFIG_PATH):
         if not results:
             raise RuntimeError("all validation cases are trivial zero-RPF cases")
     stage_start = time.perf_counter()
+    # Flatten exact FV arrays once. Case indices keep per-case metrics aligned
+    # after predictions and residuals are computed in chunks.
     data = flatten_fv_dataset({
         "p_grid": np.stack([result["p"] for result in results]),
         "xi_grid": np.stack([result["xi"] for result in results]),

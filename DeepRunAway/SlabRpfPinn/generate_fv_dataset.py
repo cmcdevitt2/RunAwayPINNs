@@ -20,6 +20,7 @@ CONFIG_PATH = Path("run_configs/fv_dataset.json")
 
 
 def launch_distributed():
+    """Recursively launch one FV process per Slurm node when needed."""
     nodes = int(os.environ.get("SLURM_JOB_NUM_NODES", "1"))
     if nodes <= 1 or "SLURM_PROCID" in os.environ:
         return False
@@ -34,6 +35,8 @@ def launch_distributed():
 
 
 if __name__ == "__main__":
+    # Rank 0 performs analytics after generation; every rank records failures
+    # through the shared run manifest path when possible.
     if launch_distributed():
         raise SystemExit(0)
     config_path = CONFIG_PATH

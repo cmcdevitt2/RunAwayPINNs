@@ -1,4 +1,8 @@
-"""Parallel CPU FV label generation for adaptive-p_min PINN datasets."""
+"""Parallel CPU FV label generation for adaptive-p_min PINN datasets.
+
+Case columns always follow ``E/Ec, Te_eV, nD_m3, nNe_m3, zD, zNe``.
+Saved fields use ``(case, p, xi)`` order and remain outside JAX autodiff.
+"""
 
 from dataclasses import dataclass
 from functools import partial
@@ -64,6 +68,7 @@ def denormalize_parameter_cases(values, parameter_domain):
 
 
 def _charge_state_densities(total, mean_charge, Z):
+    """Interpolate total density between neighboring integer charge states."""
     q = np.arange(Z + 1, dtype=float)
     return total * np.maximum(0.0, 1.0 - np.abs(mean_charge - q))
 
@@ -88,6 +93,7 @@ def solve_cpu_case(case, *, p_max, Np, Nxi, B_T, p_min_global, N_p_coarse,
     below the adaptive dense floor are filled with the analytically known
     zero probability rather than solved.
     """
+    # The solver receives physical case values, not normalized Sobol values.
     case_start = time.perf_counter()
     ebar, te_eV, nD, nNe, zD, zNe = map(float, case)
     D = ion_species_from_charge_state_densities(1, _charge_state_densities(nD, zD, 1))
@@ -101,6 +107,8 @@ def solve_cpu_case(case, *, p_max, Np, Nxi, B_T, p_min_global, N_p_coarse,
     up_max_minus_one = float(plasma.E_bar - cf_max[0])
     template = GridConfig(p_min=p_scan_min, p_max=p_max, N_p=Np, N_xi=Nxi)
     p_cap = 0.75 * p_max
+    # Rejecting this branch later keeps the training set focused on nonzero
+    # runaway probabilities while still returning a shape-compatible result.
     if up_max_minus_one <= 0.0:
         # No outward drift exists at the successful boundary: RPF is zero.
         p_dense_min = min(p_cap, max(p_scan_min, p_max * 1.0e-6))
@@ -116,6 +124,8 @@ def solve_cpu_case(case, *, p_max, Np, Nxi, B_T, p_min_global, N_p_coarse,
             "up_max_minus_one": up_max_minus_one, "linear_residual": 0.0,
             "runtime_seconds": time.perf_counter() - case_start,
         }
+    # Resolve the suprathermal U_p=0 root, then solve only above half its
+    # kinetic-energy threshold. Lower momenta receive an analytic zero tail.
     p_zero = find_up_zero_momentum(template, plasma_cfg, plasma)
     energy_zero = np.sqrt(1.0 + p_zero**2) - 1.0
     p_dense_min_uncapped = momentum_from_kinetic_energy(0.5 * energy_zero)
@@ -169,7 +179,7 @@ def generate_cpu_cases(cases, *, p_max, Np, Nxi, B_T, p_min_global, N_p_coarse,
 
 
 def flatten_fv_dataset(dataset):
-    """Flatten exact FV arrays loaded from disk without interpolation."""
+    """Flatten exact ``(case, p, xi)`` arrays without interpolation."""
     p_grid = np.asarray(dataset["p_grid"], dtype=np.float64)
     xi_grid = np.asarray(dataset["xi_grid"], dtype=np.float64)
     P_grid = np.asarray(dataset["P_grid"], dtype=np.float64)
@@ -183,7 +193,7 @@ def flatten_fv_dataset(dataset):
 
 
 def coarsen_fv_cases(results, *, p_stride=1, xi_stride=1):
-    """Return exact FV fields on a strided subset of cell centers."""
+    """Return exact strided cell centers and fields; no interpolation occurs."""
     if p_stride < 1 or xi_stride < 1:
         raise ValueError("FV strides must be positive integers")
     if not results:
@@ -197,7 +207,7 @@ def coarsen_fv_cases(results, *, p_stride=1, xi_stride=1):
 
 
 def save_fv_dataset_npz(path, cases, results, *, p_floor=None, p_max=None):
-    """Save exact FV grids as one compressed compatibility file."""
+    """Save FP64 cases, grids, fields, floors, and JSON metadata in one archive."""
     path = str(path)
     if not results:
         raise ValueError("cannot save empty FV dataset")
@@ -229,7 +239,7 @@ def save_fv_dataset_npz(path, cases, results, *, p_floor=None, p_max=None):
 
 
 def save_fv_dataset_directory(path, cases, results, *, p_floor=None, p_max=None):
-    """Save FV arrays as memory-mappable files in an atomic directory."""
+    """Save FP64 FV arrays as memory maps, then publish by directory rename."""
     path = Path(path)
     if path.exists():
         raise FileExistsError(f"dataset path already exists: {path}")
@@ -238,6 +248,8 @@ def save_fv_dataset_directory(path, cases, results, *, p_floor=None, p_max=None)
     temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     temporary.mkdir(parents=True, exist_ok=False)
     try:
+        # Build all files in a temporary sibling directory so readers never
+        # observe a partially written dataset.
         n_cases = len(results)
         n_p, n_xi = np.asarray(results[0]["P"]).shape
         np.save(temporary / "cases.npy", np.asarray(cases, dtype=np.float64))
@@ -286,7 +298,7 @@ def save_fv_dataset_directory(path, cases, results, *, p_floor=None, p_max=None)
 
 
 def load_fv_dataset(path):
-    """Load directory-backed or compressed FV grids."""
+    """Load NPZ arrays or read-only directory memory maps by path type."""
     path = Path(path)
     if path.is_dir():
         return {
@@ -304,7 +316,7 @@ def load_fv_dataset(path):
 
 
 def load_fv_cases(path):
-    """Load saved FV grids in the case/result format used by ``pinn.py``."""
+    """Load saved FV grids into the case/result format used by training."""
     dataset = load_fv_dataset(path)
     cases = np.asarray(dataset["cases"], dtype=np.float64)
     p_grid = np.asarray(dataset["p_grid"], dtype=np.float64)

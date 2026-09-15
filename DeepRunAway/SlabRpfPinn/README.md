@@ -32,7 +32,8 @@ python validate_model.py
 ```
 
 Each script reads its own JSON config: `run_configs/fv_dataset.json`,
-`run_configs/train.json`, `run_configs/validate_model.json` — see
-[`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) for every field. Each new
-run needs new `run_dir`/`output_dir`/`checkpoint_dir` values; completed runs
-are protected from overwrite.
+`run_configs/train.json`, `run_configs/validate_model.json`. Python config
+schemas validate training values, and comments in the loader code explain
+cross-stage requirements. Each new run needs new
+`run_dir`/`output_dir`/`checkpoint_dir` values; completed runs are protected
+from overwrite.
