@@ -21,8 +21,23 @@ directory — see [`docs/PROJECT_CONTEXT.md`](PROJECT_CONTEXT.md).
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+pip install "git+https://github.com/haydn-jones/SOAP_JAX"
+pip install "git+https://github.com/raj-brown/optimistix.git@feature/ss-quasi-newton"
 python -c 'import sys; print(sys.executable)'
 ```
+
+`soap-jax` on PyPI is an unrelated package (name collision with a Java
+SOAP/JAX-WS project); it does not provide the `soap_jax` module this project
+imports. Install the actual SOAP optimizer implementation directly from its
+git source, `haydn-jones/SOAP_JAX`, as shown above.
+
+Plain `optimistix` from PyPI (pulled in by `requirements.txt`) does not
+provide `AbstractSSBroyden`/`SSBroyden`, used by the SSBroyden refinement
+loop in `core/training.py`. Install the SS-Quasi-Newton fork,
+`raj-brown/optimistix.git@feature/ss-quasi-newton`, per
+[`CrunchOptimizer/PINNs`](https://github.com/CrunchOptimizer/PINNs), as shown
+above; it replaces plain `optimistix` (and downgrades its `jax`, `jaxlib`,
+`equinox`, and `lineax` pins — see Version policy below).
 
 `requirements.txt` lists the base/CPU stack plus plain `jax`, which runs on
 CPU as-is. For GPU (optional, performance only) on Perlmutter (CUDA 13
@@ -44,17 +59,20 @@ Check the complete import set after installing or changing the environment:
 
 ```bash
 python - <<'PY'
+import equinox
 import joblib
 import jax
 import matplotlib
 import numpy
 import optax
+import optimistix
 import scipy
 import soap_jax
 import tqdm
 
 print("JAX:", jax.default_backend(), jax.devices())
 print("FP64:", jax.config.jax_enable_x64)
+print("SSBroyden:", hasattr(optimistix, "AbstractSSBroyden"))
 PY
 ```
 
@@ -70,6 +88,15 @@ its CUDA plugin, and the NVIDIA driver must be a compatible set for the target
 cluster. Keep a package export or environment lockfile with production runs.
 The scripts enable JAX FP64 and disable memory preallocation before importing
 JAX; these settings are part of the numerical/runtime contract.
+
+The SS-Quasi-Newton `optimistix` fork pins an older `jax`/`jaxlib` (0.4.38)
+and downgrades `equinox` and `lineax` to match. This produces `pip` dependency
+warnings against `optax`/`chex`, which declare newer minimum `jax` versions;
+imports and `optx.minimise` construction still work under this pin set on
+CPU (verified on this project's CPU backend). Reinstalling plain `optax`
+after the fork will re-upgrade `jax` and reintroduce the missing
+`AbstractSSBroyden`/`SSBroyden` problem — always install `optimistix` from
+the fork last, as ordered above.
 
 ## Multi-node requirements
 
