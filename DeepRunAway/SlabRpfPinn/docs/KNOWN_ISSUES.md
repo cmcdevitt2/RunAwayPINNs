@@ -1,7 +1,7 @@
 # Known issues
 
 Bugs and defects tracked for future fix. Not operating instructions — see
-`CLAUDE.md`/`AGENTS.md` for those.
+`AGENTS.md` for those.
 
 ## `save_fv_dataset_directory` name collision on case-insensitive filesystems
 

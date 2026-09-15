@@ -1,8 +1,8 @@
 # Development workflow
 
 This document describes how to modify and verify the current script-driven
-SlabRpfPinn project. The root `README.md` and cluster runbooks are the
-user-facing execution documentation.
+SlabRpfPinn project. The root `README.md` is user-facing; cluster runbooks are
+internal operational documentation.
 
 ## Session start
 

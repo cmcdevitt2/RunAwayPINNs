@@ -1,7 +1,7 @@
 # Project context
 
 This document states the premises that shape every other document in this
-project. Read it before `CLAUDE.md` or `AGENTS.md`. It is agent-facing, not
+project. Read it before `AGENTS.md`. It is agent-facing, not
 part of the public-facing `README.md`.
 
 ## Repository context
@@ -25,7 +25,7 @@ Development and remote execution are two different machines:
   node is for editing and submission only, same as the local machine — never
   run production workloads there.
 
-This split is why the verification ladder in `CLAUDE.md`/`AGENTS.md` stops at
+This split is why the verification ladder in `AGENTS.md` stops at
 import/structural checks when working locally, and why claims of multi-node
 qualification require an actual HPC allocation, not just a successful local
 import.
