@@ -10,6 +10,8 @@ runs/
 backup/
 *.npz
 *.png
+!figures/
+!figures/*.png
 
 # Local environments and editor state
 .venv/

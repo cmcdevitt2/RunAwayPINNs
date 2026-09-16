@@ -23,14 +23,17 @@ import numpy as np
 from tqdm.auto import tqdm
 from jax.flatten_util import ravel_pytree
 
-from core.training_config import PinnConfig, PinnDomain, make_pinn_config
+from core.training_config import (
+    PARAMETER_NAMES, PinnConfig, PinnDomain, make_pinn_config,
+    validate_parameter_domain,
+)
 from core.model import (
     OUTPUT_TRANSFORMS, deeponet_probability, init_model, load_model,
     make_probability, predict, probability, save_model,
 )
 from core.pde import (
     analytic_threshold_collocation, evaluate_pde_residuals,
-    make_pde_functions, normalize_momentum, sobol_8d_nontrivial,
+    make_pde_functions, normalize_momentum, sobol_9d_nontrivial,
     sobol_plow_boundary_nontrivial, sobol_pmax_boundary_nontrivial,
     success_boundary_target,
 )
@@ -68,14 +71,19 @@ def _shard_with_mask(values, devices, valid_count=None):
               for start in range(0, padded_size, shard_size)]
     masks = [mask[start:start + shard_size]
              for start in range(0, padded_size, shard_size)]
-    return (jax.device_put_sharded(shards, devices),
-            jax.device_put_sharded(masks, devices),
+    return (np.stack(shards), np.stack(masks),
             int(values.shape[0]))
 
 
 def _unreplicate(tree):
     """Take the first value from each single-device replica."""
     return jax.tree_util.tree_map(lambda value: value[0], tree)
+
+
+def _replicate(tree, devices):
+    """Replicate pytree leaves as host-local leading-axis arrays for pmap."""
+    return jax.tree_util.tree_map(
+        lambda value: np.stack([np.asarray(value) for _ in devices]), tree)
 
 
 def _soap_optimizer(config):
@@ -145,7 +153,7 @@ def _shard_leading(values, devices):
     padded[:values.shape[0]] = values
     shards = [padded[start:start + shard_size]
               for start in range(0, padded_size, shard_size)]
-    return jax.device_put_sharded(shards, devices)
+    return np.stack(shards)
 
 
 def _grouped_deeponet_mse(params, data, *, max_cases=None, transform=None):
@@ -183,6 +191,9 @@ def train_supervised_deeponet(train_data, test_data, *, config, distributed=Fals
                               checkpoint_callback=None, global_case_count=None):
     """Train DeepONet from grouped cases with global batch semantics."""
     devices = _training_devices(config.n_devices)
+    if (distributed
+            and config.n_devices not in (0, len(jax.local_devices(backend="gpu")))):
+        raise ValueError("distributed training requires all local GPUs")
     local_devices = len(devices)
     process_count = jax.process_count() if distributed else 1
     n_devices = jax.device_count() if distributed else local_devices
@@ -221,8 +232,8 @@ def train_supervised_deeponet(train_data, test_data, *, config, distributed=Fals
     params = init_model(jax.random.PRNGKey(config.seed), config)
     optimizer = _soap_optimizer(config)
     opt_state = optimizer.init(params)
-    params = jax.device_put_replicated(params, devices)
-    opt_state = jax.device_put_replicated(opt_state, devices)
+    params = _replicate(params, devices)
+    opt_state = _replicate(opt_state, devices)
     transform = OUTPUT_TRANSFORMS[config.output_transform]
 
     pmap_kwargs = {"axis_name": "data"}
@@ -332,8 +343,8 @@ def train_supervised_mlp_grouped(train_data, test_data, *, config,
     params = init_model(jax.random.PRNGKey(config.seed), config)
     optimizer = _soap_optimizer(config)
     opt_state = optimizer.init(params)
-    params = jax.device_put_replicated(params, devices)
-    opt_state = jax.device_put_replicated(opt_state, devices)
+    params = _replicate(params, devices)
+    opt_state = _replicate(opt_state, devices)
     probability_fn, predict_fn = make_probability(config.output_transform)
     pmap_kwargs = {"axis_name": "data"}
     if not distributed:
@@ -417,6 +428,9 @@ def _train_physics_multi(z_data, y_data, z_pde, z_bc, *, domain, config,
                          distributed=False):
     """Run masked physics loss across local devices and optional JAX hosts."""
     devices = _training_devices(config.n_devices)
+    if (distributed
+            and config.n_devices not in (0, len(jax.local_devices(backend="gpu")))):
+        raise ValueError("distributed training requires all local GPUs")
     local_device_count = len(devices)
     process_count = jax.process_count() if distributed else 1
     process_index = jax.process_index() if distributed else 0
@@ -431,12 +445,17 @@ def _train_physics_multi(z_data, y_data, z_pde, z_bc, *, domain, config,
         raise ValueError("enable_pde=True requires PDE points")
     if config.enable_pmax_bc and len(z_bc) == 0:
         raise ValueError("enable_pmax_bc=True requires boundary points")
+    if (config.enable_pde and config.enable_threshold_pde
+            and (z_pde_threshold is None or len(z_pde_threshold) == 0)):
+        raise ValueError("threshold PDE loss requires threshold points")
+    if config.enable_low_p_bc and (z_low is None or len(z_low) == 0):
+        raise ValueError("low-p boundary loss requires low-p points")
     if len(z_data) == 0:
-        z_data, y_data = np.zeros((1, 8)), np.zeros(1)
+            z_data, y_data = np.zeros((1, 9)), np.zeros(1)
     if len(z_pde) == 0:
-        z_pde = np.zeros((1, 8))
+        z_pde = np.zeros((1, 9))
     if len(z_bc) == 0:
-        z_bc = np.zeros((1, 8))
+        z_bc = np.zeros((1, 9))
     if z_pde_threshold is None or len(z_pde_threshold) == 0:
         z_pde_threshold = np.asarray(z_pde[:1])
     if z_low is None or len(z_low) == 0:
@@ -474,8 +493,8 @@ def _train_physics_multi(z_data, y_data, z_pde, z_bc, *, domain, config,
         params = initial_params
     optimizer = _soap_optimizer(config)
     opt_state = optimizer.init(params)
-    params = jax.device_put_replicated(params, devices)
-    opt_state = jax.device_put_replicated(opt_state, devices)
+    params = _replicate(params, devices)
+    opt_state = _replicate(opt_state, devices)
     probability_fn, _ = make_probability(config.output_transform)
     coeff_fn, residual_fn = make_pde_functions(
         domain, probability_fn=probability_fn,
@@ -623,11 +642,13 @@ def train_physics_informed(z_data, y_data, z_pde, z_bc, *, domain,
     use_low = z_low is not None and len(z_low) > 0
     if config.enable_low_p_bc and not use_low:
         raise ValueError("enable_low_p_bc=True requires low-p boundary points")
-    z_data = z_data if len(z_data) else jnp.zeros((1, 8), dtype=jnp.float64)
+    z_data = z_data if len(z_data) else jnp.zeros((1, 9), dtype=jnp.float64)
     y_data = y_data if len(y_data) else jnp.zeros((1,), dtype=jnp.float64)
-    z_pde = z_pde if len(z_pde) else jnp.zeros((1, 8), dtype=jnp.float64)
-    z_bc = z_bc if len(z_bc) else jnp.zeros((1, 8), dtype=jnp.float64)
+    z_pde = z_pde if len(z_pde) else jnp.zeros((1, 9), dtype=jnp.float64)
+    z_bc = z_bc if len(z_bc) else jnp.zeros((1, 9), dtype=jnp.float64)
     use_threshold = z_pde_threshold is not None and len(z_pde_threshold) > 0
+    if config.enable_pde and config.enable_threshold_pde and not use_threshold:
+        raise ValueError("threshold PDE loss requires threshold points")
     threshold_weight = config.threshold_weight if use_threshold and config.enable_threshold_pde else 0.0
     z_pde_threshold = (jnp.asarray(z_pde_threshold) if use_threshold else z_pde[:1])
     z_low = jnp.asarray(z_low) if use_low else z_bc[:1]
@@ -690,7 +711,7 @@ def train_physics_active(z_data, y_data, z_pde, z_bc, *, domain,
                          initial_params=None):
     """Train physics-informed cycles with residual-guided FV acquisition.
 
-    ``acquire_data`` receives selected normalized eight-dimensional points and
+    ``acquire_data`` receives selected normalized nine-dimensional points and
     returns additional pointwise ``(z, y)`` FV labels. The callback stays
     outside JAX so CPU FV generation never enters autodiff.
     """
@@ -731,7 +752,7 @@ def train_physics_active(z_data, y_data, z_pde, z_bc, *, domain,
         if cycle + 1 == cycles:
             break
 
-        dense = sobol_8d_nontrivial(
+        dense = sobol_9d_nontrivial(
             dense_points, domain, seed + cycle,
             angular_sampling=config.angular_sampling,
             momentum_sampling=config.momentum_sampling)
@@ -759,10 +780,12 @@ def train_physics_active(z_data, y_data, z_pde, z_bc, *, domain,
         z_new = np.asarray(z_new, dtype=np.float64)
         y_new = np.asarray(y_new, dtype=np.float64)
         if len(z_new):
-            if z_new.ndim != 2 or z_new.shape[1] != 8:
-                raise ValueError("acquired z data must have shape (N, 8)")
-            if len(z_new) != len(y_new):
-                raise ValueError("acquired z and y data lengths must match")
+            if z_new.ndim != 2 or z_new.shape[1] != 9:
+                raise ValueError("acquired z data must have shape (N, 9)")
+            if (y_new.ndim != 1 or len(z_new) != len(y_new)
+                    or not np.isfinite(y_new).all()
+                    or np.any(y_new < 0.0) or np.any(y_new > 1.0)):
+                raise ValueError("acquired y data must be finite shape (N,) in [0, 1]")
             z_data = np.concatenate((z_data, z_new), axis=0)
             y_data = np.concatenate((y_data, y_new), axis=0)
         z_pde = np.concatenate((z_pde, z_selected), axis=0)
@@ -784,7 +807,7 @@ def train_physics_active(z_data, y_data, z_pde, z_bc, *, domain,
 
 def exact_deeponet_inputs(cases, results, parameter_domain, domain,
                           max_points=None):
-    """Build padded groups with six-parameter branch and two-coordinate trunk."""
+    """Build padded groups with seven-parameter branch and two-coordinate trunk."""
     cases = np.asarray(cases, dtype=np.float64)
     if len(cases) != len(results) or len(cases) == 0:
         raise ValueError("cases and FV results must have equal nonzero length")
@@ -824,7 +847,7 @@ def exact_deeponet_inputs(cases, results, parameter_domain, domain,
 
 
 def grouped_to_pointwise(data):
-    """Flatten groups into ``[p, xi, six parameters]`` pointwise inputs."""
+    """Flatten groups into ``[p, xi, seven parameters]`` pointwise inputs."""
     z_parts, y_parts = [], []
     for index in range(data["branch"].shape[0]):
         valid = np.asarray(data["mask"][index]) > 0.0
@@ -834,7 +857,7 @@ def grouped_to_pointwise(data):
         z_parts.append(np.concatenate((trunk, branch), axis=1))
         y_parts.append(np.asarray(data["target"][index])[valid])
     if not z_parts:
-        return np.empty((0, 8), dtype=np.float64), np.empty(0, dtype=np.float64)
+        return np.empty((0, 9), dtype=np.float64), np.empty(0, dtype=np.float64)
     return np.concatenate(z_parts), np.concatenate(y_parts)
 
 
@@ -857,11 +880,13 @@ def train_ssbroyden(params, z_data, y_data, z_pde, z_bc, *, domain,
     use_low = z_low is not None and len(z_low) > 0
     if config.enable_low_p_bc and not use_low:
         raise ValueError("enable_low_p_bc=True requires low-p boundary points")
-    z_data = z_data if len(z_data) else jnp.zeros((1, 8), dtype=jnp.float64)
+    z_data = z_data if len(z_data) else jnp.zeros((1, 9), dtype=jnp.float64)
     y_data = y_data if len(y_data) else jnp.zeros((1,), dtype=jnp.float64)
-    z_pde = z_pde if len(z_pde) else jnp.zeros((1, 8), dtype=jnp.float64)
-    z_bc = z_bc if len(z_bc) else jnp.zeros((1, 8), dtype=jnp.float64)
+    z_pde = z_pde if len(z_pde) else jnp.zeros((1, 9), dtype=jnp.float64)
+    z_bc = z_bc if len(z_bc) else jnp.zeros((1, 9), dtype=jnp.float64)
     use_threshold = z_pde_threshold is not None and len(z_pde_threshold) > 0
+    if config.enable_pde and config.enable_threshold_pde and not use_threshold:
+        raise ValueError("threshold PDE loss requires threshold points")
     threshold_weight = config.threshold_weight if use_threshold and config.enable_threshold_pde else 0.0
     z_pde_threshold = (jnp.asarray(z_pde_threshold) if use_threshold else z_pde[:1])
     z_low = jnp.asarray(z_low) if use_low else z_bc[:1]
@@ -1031,8 +1056,8 @@ def train_data_from_config(config_path=Path("configs/train.json"),
     rank = int(os.environ.get("SLURM_PROCID", "0"))
     world = int(os.environ.get("SLURM_NTASKS", "1")) if launched else 1
     run_dir = Path(run_config.get("run_dir", run_config["output_dir"]))
-    launch_id = os.environ.get("SLURM_STEP_ID") or os.environ.get(
-        "SLURM_JOB_ID", str(os.getpid()))
+    launch_id = (f"{os.environ.get('SLURM_JOB_ID', 'local')}."
+                 f"{os.environ.get('SLURM_STEP_ID', '0')}")
     if not launched:
         launch_id = f"{launch_id}.{os.getpid()}"
     launch_dir = run_dir.parent / f".{run_dir.name}.launch.{launch_id}"
@@ -1055,7 +1080,7 @@ def train_data_from_config(config_path=Path("configs/train.json"),
             expected_config=run_config,
             expected_dataset_config={
                 "p_max": run_config["domain"]["p_max"],
-                "B_T": run_config["domain"]["B_T"],
+            "fv_p_min": run_config["domain"]["p_min"],
             })
         output_dir = Path(run_config["output_dir"])
         ensure_training_output_dir(output_dir)
@@ -1108,7 +1133,7 @@ def train_data_from_config(config_path=Path("configs/train.json"),
             history = np.asarray(history)
             metadata = {
                 "architecture": {
-                    "input_dim": 8, "model_type": config.model_type,
+            "input_dim": 9, "model_type": config.model_type,
                     "width": config.width, "depth": config.depth,
                     "latent_width": config.latent_width,
                     "branch_width": config.branch_width,
@@ -1171,10 +1196,18 @@ def train_data_from_config(config_path=Path("configs/train.json"),
 
 
 def _normalize_parameter_cases(cases, parameter_domain):
-    """Map physical six-parameter cases into normalized branch coordinates."""
+    """Map physical seven-parameter cases into normalized branch coordinates."""
     cases = np.asarray(cases, dtype=np.float64)
+    parameter_domain = validate_parameter_domain(parameter_domain)
+    if cases.ndim != 2 or cases.shape[1] != len(PARAMETER_NAMES):
+        raise ValueError("parameter cases must have shape (N, 6)")
+    if not np.isfinite(cases).all():
+        raise ValueError("parameter cases must be finite")
     normalized = np.empty_like(cases)
-    for column, (lo, hi, scale) in enumerate(parameter_domain.values()):
+    for column, name in enumerate(PARAMETER_NAMES):
+        lo, hi, scale = parameter_domain[name]
+        if np.any(cases[:, column] < lo) or np.any(cases[:, column] > hi):
+            raise ValueError(f"parameter cases outside {name} domain")
         normalized[:, column] = (
             (np.log(cases[:, column]) - np.log(lo)) / (np.log(hi) - np.log(lo))
             if scale == "log" else (cases[:, column] - lo) / (hi - lo))
@@ -1182,7 +1215,7 @@ def _normalize_parameter_cases(cases, parameter_domain):
 
 
 def _build_physics_inputs(dataset, cases, parameter_domain, domain):
-    """Convert exact FV cells into normalized eight-coordinate PINN samples."""
+    """Convert exact FV cells into normalized nine-coordinate PINN samples."""
     from core.fv_dataset import flatten_fv_dataset
     # Flattening preserves exact FV cell order; only coordinate normalization
     # changes before values enter the PINN.
@@ -1223,8 +1256,8 @@ def train_physics_from_config(config_path=Path("configs/train.json"),
     rank = int(os.environ.get("SLURM_PROCID", "0"))
     world = int(os.environ.get("SLURM_NTASKS", "1")) if launched else 1
     run_dir = Path(config.get("run_dir", config["output_dir"]))
-    launch_id = os.environ.get("SLURM_STEP_ID") or os.environ.get(
-        "SLURM_JOB_ID", str(os.getpid()))
+    launch_id = (f"{os.environ.get('SLURM_JOB_ID', 'local')}."
+                 f"{os.environ.get('SLURM_STEP_ID', '0')}")
     if not launched:
         launch_id = f"{launch_id}.{os.getpid()}"
     launch_dir = run_dir.parent / f".{run_dir.name}.launch.{launch_id}"
@@ -1261,7 +1294,7 @@ def train_physics_from_config(config_path=Path("configs/train.json"),
         validate_dataset_manifest(
             dataset_path, config["dataset_manifest"], expected_config=config,
             expected_dataset_config={"p_max": config["domain"]["p_max"],
-                                     "B_T": config["domain"]["B_T"]})
+                                     "fv_p_min": config["domain"]["p_min"]})
         output_dir = Path(config["output_dir"])
         ensure_training_output_dir(output_dir)
         distributed_file_barrier(launch_dir, "preflight", rank, world)
@@ -1293,7 +1326,7 @@ def train_physics_from_config(config_path=Path("configs/train.json"),
         train_idx = rng.choice(train_pool, size=train_count, replace=False)
         test_idx = rng.choice(test_pool, size=test_count, replace=False)
         collocation = config["collocation"]
-        z_pde = sobol_8d_nontrivial(
+        z_pde = sobol_9d_nontrivial(
             int(collocation["pde_points"]), domain, training_config.seed + 1,
             angular_sampling=training_config.angular_sampling,
             momentum_sampling=training_config.momentum_sampling)
@@ -1323,14 +1356,14 @@ def train_physics_from_config(config_path=Path("configs/train.json"),
                 results = generate_cpu_cases(
                     selected_cases, p_max=domain.p_max,
                     Np=int(active.get("fv_Np", 256)), Nxi=int(active.get("fv_Nxi", 64)),
-                    B_T=domain.B_T, p_min_global=domain.p_min,
+                    p_min_global=domain.p_min,
                     N_p_coarse=int(active.get("fv_p_coarse_N", 32)),
                     n_jobs=int(active.get("n_jobs", -1)))
                 keep = np.asarray([
                     not result["trivial_zero"] and result.get("valid", True)
                     for result in results])
                 if not np.any(keep):
-                    return np.empty((0, 8)), np.empty(0)
+                    return np.empty((0, 9)), np.empty(0)
                 kept_cases = selected_cases[keep]
                 kept_results = [r for r, k in zip(results, keep) if k]
                 kept_results = coarsen_fv_cases(
@@ -1380,7 +1413,7 @@ def train_physics_from_config(config_path=Path("configs/train.json"),
             prediction_test = np.asarray(jax.device_get(
                 predict_fn(params, jnp.asarray(z_all[test_idx]))))
             metadata = {"architecture": {
-                "input_dim": 8, "model_type": training_config.model_type,
+                "input_dim": 9, "model_type": training_config.model_type,
                 "width": training_config.width, "depth": training_config.depth,
                 "latent_width": training_config.latent_width,
                 "branch_width": training_config.branch_width,

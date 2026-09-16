@@ -82,7 +82,7 @@ identify the exact skill and instruction before pausing.
   `validate_model.sbatch`) are production job entry points.
 
 Keep FV label generation outside JAX automatic differentiation. Preserve the
-normalized eight-coordinate model interface, FP64, probability bounds, FV
+normalized nine-coordinate model interface, FP64, probability bounds, FV
 boundary semantics, and parameter-domain definitions unless the task
 explicitly changes the numerical model.
 
@@ -101,8 +101,8 @@ There are three production JSON files:
   resource usage, and artifact paths;
 - `configs/validate_model.json` for model loading and analytics.
 
-Only these three JSON files are production configurations. Do not add smoke
-configs to `configs/`; use a temporary config outside the project instead.
+Only these three JSON files are production configurations. Define each run in
+one of these files and use fresh artifact paths.
 
 Root drivers remain config-driven. `train_model.py` and `validate_model.py`
 accept an optional positional config path; `generate_fv_dataset.py` uses its
@@ -119,9 +119,9 @@ are protected from overwrite.
    validation require a visible GPU backend.
 4. For FV changes, run a small CPU case and check probability bounds and
    residual. For storage or distributed changes, also verify manifest completion.
-5. For training changes, run a short GPU smoke pass with a temporary config
-   outside the project. Inspect checkpoint and loss-history files. Use CPU
-   checks only for compile, import, and configuration validation.
+5. For training changes, run the defined training configuration in a GPU
+   allocation. Inspect checkpoint and loss-history files. Use CPU checks only
+   for compile, import, and configuration validation.
 6. For validation changes, use a GPU allocation. Verify model and optional
    dataset manifests plus checksums before running analytics.
 7. For multi-node data or physics training, verify one rank per node, global

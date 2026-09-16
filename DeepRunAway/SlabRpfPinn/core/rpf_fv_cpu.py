@@ -111,8 +111,9 @@ def build_grid(cfg: GridConfig) -> Grid:
     if cfg.p_min <= 0 or cfg.p_max <= cfg.p_min:
         raise ValueError("logarithmic momentum grid requires 0 < p_min < p_max")
     p_face = np.geomspace(cfg.p_min, cfg.p_max, cfg.N_p + 1)
-    if cfg.theta_min < 0 or cfg.theta_max <= cfg.theta_min or cfg.theta_max > np.pi:
-        raise ValueError("theta grid must satisfy 0 <= theta_min < theta_max <= pi")
+    if (cfg.theta_min != 0.0 or cfg.theta_max != np.pi
+            or cfg.theta_min < 0 or cfg.theta_max <= cfg.theta_min):
+        raise ValueError("FV theta grid must span exactly [0, pi]")
     theta_face = np.linspace(cfg.theta_min, cfg.theta_max, cfg.N_xi + 1)
     # Reverse cosine values so xi increases from -1 to +1.
     xi_face = np.cos(theta_face[::-1])
@@ -155,15 +156,27 @@ def derive_plasma(cfg: PlasmaConfig) -> DerivedPlasma:
 
 def collision_coefficients(p, cfg: PlasmaConfig, plasma: DerivedPlasma):
     """Return normalized friction, radial diffusion, and angular diffusion."""
+    p = np.asarray(p, dtype=np.float64)
     gamma = np.sqrt(1 + p**2)
     x = p / (gamma * np.sqrt(2 * plasma.Theta))
     Phi = special.erf(x)
-    Psi = (Phi - 2 * x * np.exp(-x**2) / np.sqrt(np.pi)) / (2 * x**2)
+    small_x = np.abs(x) < 1.0e-3
+    Psi = np.empty_like(x)
+    Psi[small_x] = (
+        (2.0 / 3.0) * x[small_x]
+        - (2.0 / 5.0) * x[small_x]**3
+        + (1.0 / 7.0) * x[small_x]**5
+        - (1.0 / 27.0) * x[small_x]**7
+    ) / np.sqrt(np.pi)
+    Psi[~small_x] = (
+        Phi[~small_x]
+        - 2 * x[~small_x] * np.exp(-x[~small_x]**2) / np.sqrt(np.pi)
+    ) / (2 * x[~small_x]**2)
     k = 5
     lnLambda_ee = plasma.lnLambda0 + np.log1p(((gamma - 1) / plasma.Theta)**(k / 2)) / k
     lnLambda_ei = plasma.lnLambda0 + np.log1p((2 * p / np.sqrt(2 * plasma.Theta))**k) / k
-    h = np.zeros_like(p)
-    g = np.zeros_like(p)
+    h = np.zeros_like(p, dtype=np.float64)
+    g = np.zeros_like(p, dtype=np.float64)
     for ion in cfg.ions:
         for z in range(ion.Z + 1):
             N = ion.Z - z

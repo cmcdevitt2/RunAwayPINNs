@@ -1,6 +1,6 @@
 """Parallel CPU FV label generation for adaptive-p_min PINN datasets.
 
-Case columns always follow ``E/Ec, Te_eV, nD_m3, nNe_m3, zD, zNe``.
+Case columns always follow ``E/Ec, Te_eV, nD_m3, nNe_m3, zD, zNe, B_T``.
 Saved fields use ``(case, p, xi)`` order and remain outside JAX autodiff.
 """
 
@@ -24,9 +24,11 @@ from core.rpf_fv_cpu import (
     assemble_fp_operator, physical_adjoint_operator, momentum_from_kinetic_energy,
     radial_boundary_rates, collision_coefficients,
 )
+from core.training_config import PARAMETER_NAMES, validate_parameter_domain
 
 
 PROBABILITY_TOLERANCE = 1.0e-8
+LINEAR_RESIDUAL_TOLERANCE = 1.0e-8
 
 
 @dataclass(frozen=True)
@@ -34,7 +36,6 @@ class FvDatasetConfig:
     """Settings that determine generated CPU-FV training data."""
     n_cases: int = 64
     p_max: float = 15.0
-    B_T: float = 5.0
     fv_Np: int = 512
     fv_Nxi: int = 128
     fv_p_stride: int = 2
@@ -46,7 +47,9 @@ class FvDatasetConfig:
     candidate_oversample: float = 1.25
 
     def __post_init__(self):
-        if (self.n_cases <= 0 or self.p_max <= 0.0 or self.B_T < 0.0
+        if (not np.isfinite((self.p_max, self.fv_p_min,
+                             self.candidate_oversample)).all()
+                or self.n_cases <= 0 or self.p_max <= 0.0
                 or self.fv_Np <= 0 or self.fv_Nxi <= 0
                 or self.fv_p_stride <= 0 or self.fv_xi_stride <= 0
                 or self.fv_p_min <= 0.0 or self.fv_p_min >= self.p_max
@@ -57,10 +60,16 @@ class FvDatasetConfig:
 
 
 def denormalize_parameter_cases(values, parameter_domain):
-    """Map unit Sobol samples to physical six-dimensional cases."""
+    """Map unit Sobol samples to physical seven-dimensional cases."""
     values = np.asarray(values, dtype=np.float64)
+    if (values.ndim != 2 or values.shape[1] != len(PARAMETER_NAMES)
+            or not np.isfinite(values).all()
+            or np.any(values < 0.0) or np.any(values > 1.0)):
+        raise ValueError("Sobol values must have finite shape (N, 7) in [0, 1]")
+    parameter_domain = validate_parameter_domain(parameter_domain)
     cases = np.empty_like(values)
-    for column, (lo, hi, scale) in enumerate(parameter_domain.values()):
+    for column, name in enumerate(PARAMETER_NAMES):
+        lo, hi, scale = parameter_domain[name]
         cases[:, column] = (
             np.exp(np.log(lo) + values[:, column] * (np.log(hi) - np.log(lo)))
             if scale == "log" else lo + values[:, column] * (hi - lo))
@@ -79,13 +88,15 @@ def _prepend_zero_tail(p_center, P, p_min_global, N_p_coarse):
     RPF is guaranteed zero below the dense grid's adaptive floor, so the tail
     needs no solve: it is filled analytically.
     """
+    if p_center[0] <= p_min_global:
+        raise ValueError("dense FV grid must start above global momentum floor")
     p_coarse = np.geomspace(p_min_global, p_center[0], N_p_coarse + 1)[:-1]
     p_full = np.concatenate((p_coarse, p_center))
     P_full = np.vstack((np.zeros((N_p_coarse, P.shape[1]), dtype=np.float64), P))
     return p_full, P_full
 
 
-def solve_cpu_case(case, *, p_max, Np, Nxi, B_T, p_min_global, N_p_coarse,
+def solve_cpu_case(case, *, p_max, Np, Nxi, B_T=None, p_min_global, N_p_coarse,
                     p_scan_min=1.0e-12):
     """Solve one normalized-E D/Ne case on its adaptive dense log-p grid.
 
@@ -95,7 +106,13 @@ def solve_cpu_case(case, *, p_max, Np, Nxi, B_T, p_min_global, N_p_coarse,
     """
     # The solver receives physical case values, not normalized Sobol values.
     case_start = time.perf_counter()
-    ebar, te_eV, nD, nNe, zD, zNe = map(float, case)
+    if len(case) == len(PARAMETER_NAMES):
+        ebar, te_eV, nD, nNe, zD, zNe, B_T = map(float, case)
+    elif len(case) == len(PARAMETER_NAMES) - 1 and B_T is not None:
+        ebar, te_eV, nD, nNe, zD, zNe = map(float, case)
+        B_T = float(B_T)
+    else:
+        raise ValueError("FV case must contain seven parameters including B_T")
     D = ion_species_from_charge_state_densities(1, _charge_state_densities(nD, zD, 1))
     Ne = ion_species_from_charge_state_densities(10, _charge_state_densities(nNe, zNe, 10))
     plasma_base_cfg = PlasmaConfig(te_eV, 0.0, B_T, (D, Ne))
@@ -111,7 +128,7 @@ def solve_cpu_case(case, *, p_max, Np, Nxi, B_T, p_min_global, N_p_coarse,
     # runaway probabilities while still returning a shape-compatible result.
     if up_max_minus_one <= 0.0:
         # No outward drift exists at the successful boundary: RPF is zero.
-        p_dense_min = min(p_cap, max(p_scan_min, p_max * 1.0e-6))
+        p_dense_min = max(p_min_global, min(p_cap, max(p_scan_min, p_max * 1.0e-6)))
         grid = build_grid(GridConfig(p_min=p_dense_min, p_max=p_max, N_p=Np, N_xi=Nxi))
         P = np.zeros((Np, Nxi), dtype=np.float64)
         p_full, P_full = _prepend_zero_tail(
@@ -129,7 +146,7 @@ def solve_cpu_case(case, *, p_max, Np, Nxi, B_T, p_min_global, N_p_coarse,
     p_zero = find_up_zero_momentum(template, plasma_cfg, plasma)
     energy_zero = np.sqrt(1.0 + p_zero**2) - 1.0
     p_dense_min_uncapped = momentum_from_kinetic_energy(0.5 * energy_zero)
-    p_dense_min = min(p_dense_min_uncapped, p_cap)
+    p_dense_min = max(p_min_global, min(p_dense_min_uncapped, p_cap))
     grid = build_grid(GridConfig(p_min=p_dense_min, p_max=p_max, N_p=Np, N_xi=Nxi))
     coll = build_collision_data(grid, plasma_cfg, plasma)
     L = assemble_fp_operator(grid, plasma, coll)
@@ -145,7 +162,9 @@ def solve_cpu_case(case, *, p_max, Np, Nxi, B_T, p_min_global, N_p_coarse,
         np.all(np.isfinite(P))
         and np.isfinite(residual).all()
         and probability_min >= -PROBABILITY_TOLERANCE
-        and probability_max <= 1.0 + PROBABILITY_TOLERANCE)
+        and probability_max <= 1.0 + PROBABILITY_TOLERANCE
+        and float(np.linalg.norm(residual) / max(np.linalg.norm(escape), 1.0e-300))
+        <= LINEAR_RESIDUAL_TOLERANCE)
     p_full, P_full = _prepend_zero_tail(
         grid.p_center, P, p_min_global, N_p_coarse)
     return {
@@ -167,7 +186,7 @@ def solve_cpu_case(case, *, p_max, Np, Nxi, B_T, p_min_global, N_p_coarse,
     }
 
 
-def generate_cpu_cases(cases, *, p_max, Np, Nxi, B_T, p_min_global, N_p_coarse,
+def generate_cpu_cases(cases, *, p_max, Np, Nxi, B_T=None, p_min_global, N_p_coarse,
                         n_jobs=-1, p_scan_min=1.0e-12):
     """Generate adaptive-grid FV cases in parallel with joblib."""
     worker = partial(solve_cpu_case, p_max=p_max, Np=Np, Nxi=Nxi, B_T=B_T,
@@ -206,17 +225,38 @@ def coarsen_fv_cases(results, *, p_stride=1, xi_stride=1):
     } for result in results]
 
 
+def _validate_fv_results(cases, results):
+    """Validate case count, grid shape, monotonicity, and finite field values."""
+    cases = np.asarray(cases, dtype=np.float64)
+    if (cases.ndim != 2 or cases.shape[1] != len(PARAMETER_NAMES)
+            or not np.isfinite(cases).all()):
+        raise ValueError("FV cases must have finite shape (N, 7)")
+    if len(cases) == 0 or len(cases) != len(results):
+        raise ValueError("FV cases and results must have equal nonzero length")
+    for result in results:
+        p = np.asarray(result["p"], dtype=np.float64)
+        xi = np.asarray(result["xi"], dtype=np.float64)
+        field = np.asarray(result["P"], dtype=np.float64)
+        if (field.shape != (len(p), len(xi))
+                or not np.isfinite(p).all() or not np.isfinite(xi).all()
+                or not np.isfinite(field).all()
+                or np.any(np.diff(p) <= 0.0) or np.any(np.diff(xi) <= 0.0)):
+            raise ValueError("FV result has invalid grid or field values")
+    return cases, results
+
+
 def save_fv_dataset_npz(path, cases, results, *, p_floor=None, p_max=None):
     """Save FP64 cases, grids, fields, floors, and JSON metadata in one archive."""
     path = str(path)
-    if not results:
-        raise ValueError("cannot save empty FV dataset")
+    cases, results = _validate_fv_results(cases, results)
     p_grid = np.stack([result["p"] for result in results])
     xi_grid = np.stack([result["xi"] for result in results])
     P_grid = np.stack([result["P"] for result in results])
     metadata = [{
         "p_dense_min": float(result["p_dense_min"]),
-        "p_zero": float(result["p_zero"]) if np.isfinite(result["p_zero"]) else None,
+        "p_zero": (float(result["p_zero"])
+                   if result.get("p_zero") is not None
+                   and np.isfinite(result["p_zero"]) else None),
             "trivial_zero": bool(result["trivial_zero"]),
             "valid": bool(result.get("valid", True)),
             "probability_min": float(result.get("probability_min", np.min(result["P"]))),
@@ -247,8 +287,7 @@ def save_fv_dataset_directory(path, cases, results, *, p_floor=None, p_max=None)
     path = Path(path)
     if path.exists():
         raise FileExistsError(f"dataset path already exists: {path}")
-    if not results:
-        raise ValueError("cannot save empty FV dataset")
+    cases, results = _validate_fv_results(cases, results)
     temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     temporary.mkdir(parents=True, exist_ok=False)
     try:
@@ -276,7 +315,9 @@ def save_fv_dataset_directory(path, cases, results, *, p_floor=None, p_max=None)
             P_grid[index] = field
             metadata.append({
                 "p_dense_min": float(result["p_dense_min"]),
-                "p_zero": float(result["p_zero"]) if np.isfinite(result["p_zero"]) else None,
+                "p_zero": (float(result["p_zero"])
+                           if result.get("p_zero") is not None
+                           and np.isfinite(result["p_zero"]) else None),
                 "trivial_zero": bool(result["trivial_zero"]),
                 "valid": bool(result.get("valid", True)),
                 "probability_min": float(result.get("probability_min", np.min(field))),
@@ -394,6 +435,7 @@ def summarize_fv_dataset(dataset_path):
             "nNe_m3": [float(cases[:, 3].min()), float(cases[:, 3].max())],
             "zD": [float(cases[:, 4].min()), float(cases[:, 4].max())],
             "zNe": [float(cases[:, 5].min()), float(cases[:, 5].max())],
+            "B_T": [float(cases[:, 6].min()), float(cases[:, 6].max())],
         },
     }
 

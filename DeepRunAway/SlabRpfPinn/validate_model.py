@@ -19,23 +19,19 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from core.fv_dataset import flatten_fv_dataset, generate_cpu_cases, load_fv_cases
-from core.training_config import PinnDomain
+from core.training_config import (
+    DEFAULT_PARAMETER_DOMAIN, PARAMETER_NAMES, PinnDomain,
+    validate_parameter_domain,
+)
 from core.model import load_model, make_probability
-from core.pde import drift_up, make_pde_functions, normalize_momentum, sobol_6d
+from core.pde import drift_up, make_pde_functions, normalize_momentum, sobol_7d
 from core.training_artifacts import (
     atomic_write_json, sha256_path, validate_dataset_manifest,
     validate_model_manifest,
 )
 
 
-PARAMETER_DOMAIN = {
-    "E/Ec": (1.0, 1000.0, "log"),
-    "Te_eV": (0.1, 100.0, "log"),
-    "nD_m3": (1.0e20, 1.0e22, "log"),
-    "nNe_m3": (1.0e16, 1.0e22, "log"),
-    "zD": (0.01, 1.0, "linear"),
-    "zNe": (0.01, 10.0, "linear"),
-}
+PARAMETER_DOMAIN = DEFAULT_PARAMETER_DOMAIN
 
 
 def regional_metrics(prediction, target):
@@ -59,10 +55,12 @@ def regional_metrics(prediction, target):
 
 
 def sample_cases(n_cases, seed, parameter_domain):
-    """Generate reproducible six-parameter physical cases from scrambled Sobol points."""
-    unit = sobol_6d(n_cases, seed)
+    """Generate reproducible seven-parameter physical cases from Sobol points."""
+    parameter_domain = validate_parameter_domain(parameter_domain)
+    unit = sobol_7d(n_cases, seed)
     cases = np.empty_like(unit)
-    for k, (lo, hi, scale) in enumerate(parameter_domain.values()):
+    for k, name in enumerate(PARAMETER_NAMES):
+        lo, hi, scale = parameter_domain[name]
         cases[:, k] = (np.exp(np.log(lo) + unit[:, k] * (np.log(hi) - np.log(lo)))
                        if scale == "log" else lo + unit[:, k] * (hi - lo))
     return cases
@@ -70,15 +68,17 @@ def sample_cases(n_cases, seed, parameter_domain):
 
 def build_validation_inputs(dataset, cases, p_floor, p_max,
                             momentum_sampling, parameter_domain):
-    """Build normalized eight-coordinate inputs aligned with flattened FV values."""
+    """Build normalized nine-coordinate inputs aligned with flattened FV values."""
     case_index = np.asarray(dataset["case_index"], dtype=np.int64)
     p = np.asarray(dataset["p"], dtype=np.float64)
     normalized = np.empty_like(cases, dtype=np.float64)
-    for column, (lo, hi, scale) in enumerate(parameter_domain.values()):
+    parameter_domain = validate_parameter_domain(parameter_domain)
+    for column, name in enumerate(PARAMETER_NAMES):
+        lo, hi, scale = parameter_domain[name]
         normalized[:, column] = (
             (np.log(cases[:, column]) - np.log(lo)) / (np.log(hi) - np.log(lo))
             if scale == "log" else (cases[:, column] - lo) / (hi - lo))
-    z = np.empty((len(p), 8), dtype=np.float64)
+    z = np.empty((len(p), 9), dtype=np.float64)
     z[:, 0] = normalize_momentum(p, p_floor, p_max, momentum_sampling)
     z[:, 1] = 0.5 * (np.asarray(dataset["xi"]) + 1.0)
     z[:, 2:] = normalized[case_index]
@@ -99,6 +99,15 @@ def evaluate_pde_chunked(params, z, domain, chunk_size, *, probability_fn=None,
     return np.concatenate(values) if values else np.empty(0, dtype=np.float64)
 
 
+def evaluate_predictions_chunked(params, z, predict_fn, chunk_size=65536):
+    """Evaluate model predictions in bounded JAX batches."""
+    values = []
+    for start in range(0, len(z), chunk_size):
+        batch = jnp.asarray(z[start:start + chunk_size])
+        values.append(np.asarray(jax.device_get(predict_fn(params, batch))))
+    return np.concatenate(values) if values else np.empty(0, dtype=np.float64)
+
+
 def save_validation_plots(output_base, target, prediction, error, pde,
                           case_index, results, per_case, z, domain):
     """Save correlation and worst-case field plots with the analytic threshold overlay."""
@@ -110,22 +119,28 @@ def save_validation_plots(output_base, target, prediction, error, pde,
     cache_dir.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("MPLCONFIGDIR", str(cache_dir))
 
+    plot_count = min(len(target), 200000)
+    plot_index = np.linspace(0, len(target) - 1, plot_count, dtype=np.int64)
     fig, axes = plt.subplots(2, 2, figsize=(11, 9), constrained_layout=True)
-    axes[0, 0].scatter(target, prediction, c=case_index, s=2, alpha=0.25,
+    axes[0, 0].scatter(target[plot_index], prediction[plot_index],
+                       c=case_index[plot_index], s=2, alpha=0.25,
                        cmap="turbo")
     axes[0, 0].plot([0, 1], [0, 1], "k--", linewidth=1)
     axes[0, 0].set(xlabel="FV P", ylabel="PINN P", title="Prediction correlation")
-    axes[0, 1].scatter(target, np.abs(error), c=case_index, s=2, alpha=0.25,
+    axes[0, 1].scatter(target[plot_index], np.abs(error[plot_index]),
+                       c=case_index[plot_index], s=2, alpha=0.25,
                        cmap="turbo")
     axes[0, 1].set(xlabel="FV P", ylabel="|PINN − FV|", title="Absolute error")
-    axes[1, 0].scatter(target, np.abs(pde), c=case_index, s=2, alpha=0.25,
+    axes[1, 0].scatter(target[plot_index], np.abs(pde[plot_index]),
+                       c=case_index[plot_index], s=2, alpha=0.25,
                        cmap="turbo")
     axes[1, 0].set_yscale("log")
     axes[1, 0].set(xlabel="FV P", ylabel="|PDE residual|",
                    title="PDE residual correlation")
-    axes[1, 1].scatter(np.maximum(np.abs(error), 1.0e-16),
-                       np.maximum(np.abs(pde), 1.0e-16),
-                       c=case_index, s=2, alpha=0.25, cmap="turbo")
+    axes[1, 1].scatter(np.maximum(np.abs(error[plot_index]), 1.0e-16),
+                       np.maximum(np.abs(pde[plot_index]), 1.0e-16),
+                       c=case_index[plot_index], s=2, alpha=0.25,
+                       cmap="turbo")
     axes[1, 1].set(xscale="log", yscale="log",
                    xlabel="|PINN − FV|", ylabel="|PDE residual|",
                    title="Error/residual correlation")
@@ -152,9 +167,9 @@ def save_validation_plots(output_base, target, prediction, error, pde,
             np.abs(error[mask]).reshape(shape),
             np.abs(pde[mask]).reshape(shape),
         ]
-        z_case = z[mask].reshape(shape + (8,))
+        z_case = z[mask].reshape(shape + (9,))
         up = np.asarray(jax.device_get(
-            drift_up(jnp.asarray(z_case.reshape(-1, 8)), domain)
+            drift_up(jnp.asarray(z_case.reshape(-1, 9)), domain)
         )).reshape(shape)
         titles = ["FV RPF", "PINN RPF", "|PINN − FV|", "|PDE residual|"]
         for column, (field, title) in enumerate(zip(fields, titles)):
@@ -216,13 +231,14 @@ def main(config_path=CONFIG_PATH):
     timing_start = time.perf_counter()
     print("loading model", flush=True)
     model_path = args.model_dir / "pinn_params.npz"
-    if args.model_manifest:
-        validate_model_manifest(model_path, args.model_manifest)
+    if not args.model_manifest:
+        raise ValueError("model_manifest is required for validation")
+    validate_model_manifest(model_path, args.model_manifest)
     metadata = json.loads((args.model_dir / "model_metadata.json").read_text())
-    parameter_domain = metadata.get("parameter_domain", PARAMETER_DOMAIN)
+    parameter_domain = validate_parameter_domain(
+        metadata.get("parameter_domain", PARAMETER_DOMAIN))
     p_floor = float(metadata["normalization"]["p_floor"])
     p_max = float(metadata["normalization"]["p_max"])
-    B_T = float(metadata["domain"]["B_T"])
     momentum_sampling = metadata["domain"].get("momentum_sampling", "log")
     architecture = metadata.get("architecture", {})
     training_config = metadata.get(
@@ -262,7 +278,7 @@ def main(config_path=CONFIG_PATH):
         validate_dataset_manifest(
             args.dataset_path, args.dataset_manifest,
             expected_config={"parameter_domain": parameter_domain},
-            expected_dataset_config={"p_max": p_max, "B_T": B_T})
+            expected_dataset_config={"p_max": p_max, "fv_p_min": p_floor})
         cases, results = load_fv_cases(args.dataset_path)
         print(f"using validated FV dataset: {args.dataset_path}", flush=True)
     else:
@@ -270,7 +286,7 @@ def main(config_path=CONFIG_PATH):
         stage_start = time.perf_counter()
         results = generate_cpu_cases(
             cases, p_max=p_max, Np=args.fv_Np, Nxi=args.fv_Nxi,
-            B_T=B_T, p_min_global=p_floor, N_p_coarse=args.fv_p_coarse_N,
+            p_min_global=p_floor, N_p_coarse=args.fv_p_coarse_N,
             n_jobs=args.n_jobs)
         print(f"FV generation: {time.perf_counter() - stage_start:.3f} s", flush=True)
         keep = np.array([
@@ -294,7 +310,8 @@ def main(config_path=CONFIG_PATH):
         data, cases, p_floor, p_max, momentum_sampling, parameter_domain)
     target = np.asarray(data["P"], dtype=np.float64)
     stage_start = time.perf_counter()
-    prediction = np.asarray(jax.device_get(predict_fn(params, jnp.asarray(z))))
+    prediction = evaluate_predictions_chunked(
+        params, z, predict_fn, chunk_size=max(args.pde_chunk, 65536))
     print(f"PINN prediction: {time.perf_counter() - stage_start:.3f} s", flush=True)
     error = prediction - target
 
@@ -307,9 +324,12 @@ def main(config_path=CONFIG_PATH):
     pde_rms = float(np.sqrt(np.mean(pde * pde)))
 
     per_case = []
-    parameter_names = list(parameter_domain)
+    parameter_names = PARAMETER_NAMES
+    if len(target) % len(results) != 0:
+        raise ValueError("validation cells are not evenly grouped by case")
+    points_per_case = len(target) // len(results)
+    error_by_case = error.reshape(len(results), points_per_case)
     for case_number in range(len(results)):
-        mask = case_index == case_number
         per_case.append({
             "case": case_number,
             "parameters": {
@@ -318,8 +338,8 @@ def main(config_path=CONFIG_PATH):
             },
             "p_dense_min": float(results[case_number]["p_dense_min"]),
             "trivial_zero": bool(results[case_number]["trivial_zero"]),
-            "mse": float(np.mean(error[mask] ** 2)),
-            "max_abs_error": float(np.max(np.abs(error[mask]))),
+            "mse": float(np.mean(error_by_case[case_number] ** 2)),
+            "max_abs_error": float(np.max(np.abs(error_by_case[case_number]))),
         })
 
     summary = {
@@ -339,6 +359,8 @@ def main(config_path=CONFIG_PATH):
     if args.model_manifest:
         summary["model_manifest"] = str(args.model_manifest)
     output_dir = args.output_dir or args.model_dir
+    if output_dir.exists() and any(output_dir.iterdir()):
+        raise FileExistsError(f"validation output directory is not empty: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
     if args.plot is not None:
         correlation_path, cases_path = save_validation_plots(

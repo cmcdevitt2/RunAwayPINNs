@@ -8,27 +8,92 @@ accepted only through the compatibility adapter at the bottom of this file.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 
+PARAMETER_NAMES = ("E/Ec", "Te_eV", "nD_m3", "nNe_m3", "zD", "zNe", "B_T")
+DEFAULT_PARAMETER_DOMAIN = {
+    "E/Ec": [1.0, 1000.0, "log"],
+    "Te_eV": [0.1, 100.0, "log"],
+    "nD_m3": [1.0e20, 1.0e22, "log"],
+    "nNe_m3": [1.0e16, 1.0e22, "log"],
+    "zD": [0.001, 1.0, "log"],
+    "zNe": [0.001, 10.0, "log"],
+    "B_T": [1.0, 20.0, "linear"],
+}
+
+
+def validate_parameter_domain(parameter_domain):
+    """Validate and return parameter bounds in canonical seven-name order."""
+    if set(parameter_domain) != set(PARAMETER_NAMES):
+        raise ValueError(f"parameter domain must contain {PARAMETER_NAMES}")
+    normalized = {}
+    for name in PARAMETER_NAMES:
+        values = parameter_domain[name]
+        if len(values) != 3:
+            raise ValueError(f"parameter domain entry {name} must have three values")
+        lower, upper, scale = values
+        if (not math.isfinite(float(lower)) or not math.isfinite(float(upper))
+                or float(upper) <= float(lower)
+                or scale not in ("log", "linear")
+                or (scale == "log" and float(lower) <= 0.0)):
+            raise ValueError(f"invalid parameter domain entry {name}")
+        normalized[name] = [float(lower), float(upper), scale]
+    return normalized
+
+
+def validate_parameter_domain_matches_pinn(parameter_domain, domain):
+    """Require seven physical bounds to match the normalized PINN domain."""
+    parameter_domain = validate_parameter_domain(parameter_domain)
+    expected = {
+        "E/Ec": (domain.ebar_min, domain.ebar_max, "log"),
+        "Te_eV": (domain.te_min_eV, domain.te_max_eV, "log"),
+        "nD_m3": (domain.nD_min_m3, domain.nD_max_m3, "log"),
+        "nNe_m3": (domain.nNe_min_m3, domain.nNe_max_m3, "log"),
+        "zD": (domain.zD_min, domain.zD_max, "log"),
+        "zNe": (domain.zNe_min, domain.zNe_max, "log"),
+        "B_T": (domain.B_T_min, domain.B_T_max, "linear"),
+    }
+    for name, (lower, upper, scale) in expected.items():
+        configured = parameter_domain[name]
+        if configured != [float(lower), float(upper), scale]:
+            raise ValueError(f"parameter domain does not match domain.{name}")
 
 @dataclass(frozen=True)
 class PinnDomain:
     """Physical bounds mapped from normalized model coordinates in ``[0, 1]``."""
     p_min: float
     p_max: float
-    B_T: float
+    B_T_min: float
+    B_T_max: float
     momentum_sampling: str = "log"
     ebar_min: float = 1.0
     ebar_max: float = 1000.0
-    te_min_eV: float = 1.0
+    te_min_eV: float = 0.1
     te_max_eV: float = 100.0
     nD_min_m3: float = 1.0e20
     nD_max_m3: float = 1.0e22
     nNe_min_m3: float = 1.0e16
     nNe_max_m3: float = 1.0e22
-    zD_min: float = 0.01
+    zD_min: float = 0.001
     zD_max: float = 1.0
-    zNe_min: float = 0.01
+    zNe_min: float = 0.001
     zNe_max: float = 10.0
+
+    def __post_init__(self):
+        ranges = (
+            ("p", self.p_min, self.p_max, True),
+            ("E/Ec", self.ebar_min, self.ebar_max, True),
+            ("Te_eV", self.te_min_eV, self.te_max_eV, True),
+            ("nD_m3", self.nD_min_m3, self.nD_max_m3, True),
+            ("nNe_m3", self.nNe_min_m3, self.nNe_max_m3, True),
+            ("zD", self.zD_min, self.zD_max, False),
+            ("zNe", self.zNe_min, self.zNe_max, False),
+            ("B_T", self.B_T_min, self.B_T_max, True),
+        )
+        for name, lower, upper, positive in ranges:
+            if (not math.isfinite(lower) or not math.isfinite(upper)
+                    or upper <= lower or (positive and lower <= 0.0)):
+                raise ValueError(f"invalid {name} domain")
 
 
 @dataclass(frozen=True)
@@ -79,10 +144,25 @@ class LossConfig:
             raise ValueError("at least one training loss term must be enabled")
         if self.enable_threshold_pde and not self.enable_pde:
             raise ValueError("threshold PDE loss requires enable_pde=True")
+        scalar_settings = (
+            self.data_weight, self.pde_weight, self.threshold_weight,
+            self.low_p_weight, self.bc_weight, self.residual_floor)
+        if not all(math.isfinite(weight) for weight in scalar_settings):
+            raise ValueError("loss weights and residual_floor must be finite")
         if any(weight < 0.0 for weight in (
                 self.data_weight, self.pde_weight, self.threshold_weight,
                 self.low_p_weight, self.bc_weight)):
             raise ValueError("loss weights must be non-negative")
+        effective_weights = (
+            self.enable_data and self.data_weight,
+            self.enable_pde and self.pde_weight,
+            (self.enable_pde and self.enable_threshold_pde
+             and self.pde_weight * self.threshold_weight),
+            self.enable_low_p_bc and self.low_p_weight,
+            self.enable_pmax_bc and self.bc_weight,
+        )
+        if not any(weight > 0.0 for weight in effective_weights):
+            raise ValueError("at least one enabled loss term needs positive weight")
         if self.residual_coeff_norm not in ("cf_ebar", "coeff_l2", "none"):
             raise ValueError(
                 "residual_coeff_norm must be 'cf_ebar', 'coeff_l2', or 'none'")
@@ -256,12 +336,13 @@ def _legacy_sections(run_config):
     flat = dict(run_config.get("pinn_config", {}))
     model_keys = {
         "model_type", "width", "depth", "latent_width", "branch_width",
-        "branch_depth", "trunk_width", "trunk_depth",
+        "branch_depth", "trunk_width", "trunk_depth", "output_transform",
     }
     loss_keys = {
         "enable_data", "enable_pde", "enable_threshold_pde",
         "enable_low_p_bc", "enable_pmax_bc", "data_weight", "pde_weight",
         "threshold_weight", "low_p_weight", "bc_weight",
+        "residual_coeff_norm", "residual_floor",
     }
     optimizer_keys = set(flat) - model_keys - loss_keys - {
         "angular_sampling", "momentum_sampling",
@@ -273,6 +354,7 @@ def _legacy_sections(run_config):
 
 def make_pinn_config(run_config):
     """Build schema from JSON, preferring hierarchical sections over legacy ones."""
+    parameter_domain = validate_parameter_domain(run_config["parameter_domain"])
     legacy_model, legacy_loss, legacy_optimizer = _legacy_sections(run_config)
     model = dict(run_config.get("model", legacy_model))
     loss = dict(run_config.get("loss", legacy_loss))
@@ -287,9 +369,11 @@ def make_pinn_config(run_config):
         run_config.get("angular_sampling",
                        run_config.get("pinn_config", {}).get(
                            "angular_sampling", "xi")))
+    domain = PinnDomain(**run_config["domain"])
+    validate_parameter_domain_matches_pinn(parameter_domain, domain)
     return TrainingConfig(
         mode=mode,
-        domain=PinnDomain(**run_config["domain"]),
+        domain=domain,
         angular_sampling=angular_sampling,
         model=ModelConfig(**model),
         loss=LossConfig(**loss),

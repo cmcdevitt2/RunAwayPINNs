@@ -29,6 +29,8 @@ from core.training_artifacts import (
     finish_run, sha256_path,
 )
 
+MAX_FV_ROUNDS = 128
+
 
 def _barrier(work_dir, label, rank, world, timeout_seconds=7200.0):
     """Synchronize ranks with shared marker files and propagate rank failures."""
@@ -116,7 +118,7 @@ def _main(config_path):
 
     # Only rank 0 advances Sobol state. Other ranks receive exact candidate
     # files, which keeps a multi-node run reproducible.
-    engine = qmc.Sobol(d=6, scramble=True, seed=dataset_config["seed"]) if rank == 0 else None
+    engine = qmc.Sobol(d=7, scramble=True, seed=dataset_config["seed"]) if rank == 0 else None
     accepted_cases = []
     accepted_results = []
     round_number = 0
@@ -145,7 +147,7 @@ def _main(config_path):
         local_results = generate_cpu_cases(
             local_cases, p_max=dataset_config["p_max"],
             Np=dataset_config["fv_Np"], Nxi=dataset_config["fv_Nxi"],
-            B_T=dataset_config["B_T"], p_min_global=dataset_config["fv_p_min"],
+            p_min_global=dataset_config["fv_p_min"],
             N_p_coarse=dataset_config["fv_p_coarse_N"], n_jobs=worker_count)
         local_results = coarsen_fv_cases(
             local_results, p_stride=dataset_config["fv_p_stride"],
@@ -176,6 +178,13 @@ def _main(config_path):
             (work_dir / f"status.round{round_number}.json").read_text())
         if status["complete"]:
             break
+        if round_number + 1 >= MAX_FV_ROUNDS:
+            if rank == 0:
+                finish_run(
+                    manifest_path, status="failed",
+                    error=f"FV acceptance did not reach target after {MAX_FV_ROUNDS} rounds")
+            raise RuntimeError(
+                f"FV acceptance did not reach target after {MAX_FV_ROUNDS} rounds")
         round_number += 1
 
     if rank == 0:
@@ -186,12 +195,14 @@ def _main(config_path):
         if dataset_format == "directory":
             save_fv_dataset_directory(
                 output_path, np.asarray(accepted_cases), accepted_results,
+                p_floor=dataset_config["fv_p_min"],
                 p_max=dataset_config["p_max"])
         elif dataset_format == "npz":
             temporary_output = output_path.with_name(
                 f".{output_path.name}.{os.getpid()}.tmp.npz")
             save_fv_dataset_npz(
                 temporary_output, np.asarray(accepted_cases), accepted_results,
+                p_floor=dataset_config["fv_p_min"],
                 p_max=dataset_config["p_max"])
             atomic_replace(temporary_output, output_path)
         else:

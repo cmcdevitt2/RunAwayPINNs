@@ -1,9 +1,9 @@
 """PDE coefficients, residuals, boundaries, and collocation sampling.
 
-Model inputs stay normalized to ``[0, 1]^8``. The first two coordinates are
-momentum and ``xi``; the remaining six are ``E/Ec, Te_eV, nD_m3, nNe_m3,
-zD, zNe``. Physical derivatives are converted through the selected momentum
-mapping before residual evaluation.
+Model inputs stay normalized to ``[0, 1]^9``. The first two coordinates are
+momentum and ``xi``; the remaining seven are ``E/Ec, Te_eV, nD_m3, nNe_m3,
+zD, zNe, B_T``. Physical derivatives are converted through the selected
+momentum mapping before residual evaluation.
 """
 
 from __future__ import annotations
@@ -26,7 +26,8 @@ from core.training_config import PinnDomain
 
 
 def _table(values, fully_stripped):
-    return jnp.asarray(list(values) + [fully_stripped], dtype=jnp.float64)
+    # Keep constants on host until distributed JAX initialization completes.
+    return np.asarray(list(values) + [fully_stripped], dtype=np.float64)
 
 
 D_I_EV = _table(MEAN_EXCITATION_EV_BY_Z[1], 1.0)
@@ -56,15 +57,15 @@ def normalize_momentum(p, p_min: float, p_max: float,
     raise ValueError("momentum_sampling must be 'log' or 'linear'")
 
 
-def sobol_8d(n_points: int, seed: int = 0, *, angular_sampling: str = "xi",
+def sobol_9d(n_points: int, seed: int = 0, *, angular_sampling: str = "xi",
              momentum_sampling: str = "log") -> np.ndarray:
-    """Generate reproducible normalized eight-coordinate Sobol samples."""
+    """Generate reproducible normalized nine-coordinate Sobol samples."""
     if n_points <= 0:
-        return np.empty((0, 8), dtype=np.float64)
+        return np.empty((0, 9), dtype=np.float64)
     if momentum_sampling not in ("log", "linear"):
         raise ValueError("momentum_sampling must be 'log' or 'linear'")
     points = np.asarray(
-        qmc.Sobol(d=8, scramble=True, seed=seed).random(n_points),
+        qmc.Sobol(d=9, scramble=True, seed=seed).random(n_points),
         dtype=np.float64)
     return _transform_angular_sampling(points, angular_sampling)
 
@@ -75,7 +76,7 @@ def _map_unit(u, lo, hi, scale):
 
 
 def split_inputs(z, domain: PinnDomain):
-    """Split inputs into physical momentum, pitch cosine, and plasma values."""
+    """Split normalized inputs into momentum, pitch cosine, plasma values, and B."""
     p = (jnp.exp(jnp.log(domain.p_min)
          + z[..., 0] * jnp.log(domain.p_max / domain.p_min))
          if domain.momentum_sampling == "log"
@@ -85,9 +86,12 @@ def split_inputs(z, domain: PinnDomain):
     te = _map_unit(z[..., 3], domain.te_min_eV, domain.te_max_eV, "log")
     nD = _map_unit(z[..., 4], domain.nD_min_m3, domain.nD_max_m3, "log")
     nNe = _map_unit(z[..., 5], domain.nNe_min_m3, domain.nNe_max_m3, "log")
-    zD = domain.zD_min + z[..., 6] * (domain.zD_max - domain.zD_min)
-    zNe = domain.zNe_min + z[..., 7] * (domain.zNe_max - domain.zNe_min)
-    return p, xi, ebar, te, nD, nNe, zD, zNe
+    zD = jnp.exp(jnp.log(domain.zD_min)
+                 + z[..., 6] * jnp.log(domain.zD_max / domain.zD_min))
+    zNe = jnp.exp(jnp.log(domain.zNe_min)
+                  + z[..., 7] * jnp.log(domain.zNe_max / domain.zNe_min))
+    B_T = domain.B_T_min + z[..., 8] * (domain.B_T_max - domain.B_T_min)
+    return p, xi, ebar, te, nD, nNe, zD, zNe, B_T
 
 
 def charge_weights(zavg, Z):
@@ -122,7 +126,11 @@ def collision_coefficients(p, te_eV, nD, nNe, zD, zNe, B_T):
     gamma_minus_one = p * p / (gamma + 1.0)
     x = p / (delta * gamma)
     phi = jax.scipy.special.erf(x)
-    psi = (phi - 2.0 * x * jnp.exp(-x * x) / jnp.sqrt(jnp.pi)) / (2.0 * x * x)
+    psi_direct = ((phi - 2.0 * x * jnp.exp(-x * x) / jnp.sqrt(jnp.pi))
+                  / (2.0 * jnp.maximum(x * x, 1.0e-30)))
+    psi_series = ((2.0 / 3.0) * x - (2.0 / 5.0) * x**3
+                  + (1.0 / 7.0) * x**5 - (1.0 / 27.0) * x**7) / jnp.sqrt(jnp.pi)
+    psi = jnp.where(jnp.abs(x) < 1.0e-3, psi_series, psi_direct)
     q_ee = 2.0 * gamma_minus_one / (delta * delta)
     q_ei = 2.0 * p / delta
     ln_ee = ln0 + jnp.log1p(q_ee ** 2.5) / 5.0
@@ -144,21 +152,21 @@ def collision_coefficients(p, te_eV, nD, nNe, zD, zNe, B_T):
     nud = gamma / (p ** 3) * (zeff * r_ei + r_ee * ee_deflection + g / ln0)
     tau_c = 4.0 * jnp.pi * constants.epsilon_0**2 * constants.m_e**2 * constants.c**3 / (
         constants.e**4 * ne * ln0)
-    alpha = (jnp.asarray(0.0, dtype=jnp.float64) if B_T == 0.0 else
-             tau_c / (6.0 * jnp.pi * constants.epsilon_0 * constants.m_e ** 3
-                      * constants.c ** 3 /
-                      (constants.e ** 4 * B_T ** 2)))
+    tau_syn = (6.0 * jnp.pi * constants.epsilon_0 * constants.m_e ** 3
+               * constants.c ** 3 /
+               (constants.e ** 4 * B_T ** 2))
+    alpha = tau_c / tau_syn
     return cf, nud, alpha
 
 
-def sobol_8d_nontrivial(n_points: int, domain: PinnDomain, seed: int = 0, *,
+def sobol_9d_nontrivial(n_points: int, domain: PinnDomain, seed: int = 0, *,
                          angular_sampling: str = "xi",
                          momentum_sampling: str = "log",
                          batch_size: int = 32768) -> np.ndarray:
-    """Sample cases with positive drift at the successful ``p_max, xi=-1`` boundary."""
+    """Sample nine-coordinate cases with positive upper-boundary drift."""
     if n_points <= 0:
-        return np.empty((0, 8), dtype=np.float64)
-    engine = qmc.Sobol(d=8, scramble=True, seed=seed)
+        return np.empty((0, 9), dtype=np.float64)
+    engine = qmc.Sobol(d=10, scramble=True, seed=seed)
     accepted, count = [], 0
     for _ in range(128):
         z = _transform_angular_sampling(
@@ -167,9 +175,9 @@ def sobol_8d_nontrivial(n_points: int, domain: PinnDomain, seed: int = 0, *,
         z_boundary = z.copy()
         z_boundary[:, 0] = 1.0
         z_boundary[:, 1] = 0.0
-        p, xi, ebar, te, nD, nNe, zD, zNe = split_inputs(
+        p, xi, ebar, te, nD, nNe, zD, zNe, B_T = split_inputs(
             jnp.asarray(z_boundary), domain)
-        cf, _, _ = collision_coefficients(p, te, nD, nNe, zD, zNe, domain.B_T)
+        cf, _, _ = collision_coefficients(p, te, nD, nNe, zD, zNe, B_T)
         keep = np.asarray(jax.device_get(ebar - cf)) > 0.0
         if np.any(keep):
             accepted.append(z[keep])
@@ -183,10 +191,11 @@ def sobol_8d_nontrivial(n_points: int, domain: PinnDomain, seed: int = 0, *,
     return np.concatenate(accepted, axis=0)[:n_points]
 
 
-def sobol_6d(n_points: int, seed: int = 0) -> np.ndarray:
+def sobol_7d(n_points: int, seed: int = 0) -> np.ndarray:
+    """Generate reproducible normalized seven-parameter Sobol samples."""
     if n_points <= 0:
-        return np.empty((0, 6), dtype=np.float64)
-    return np.asarray(qmc.Sobol(d=6, scramble=True, seed=seed).random(n_points),
+        return np.empty((0, 7), dtype=np.float64)
+    return np.asarray(qmc.Sobol(d=7, scramble=True, seed=seed).random(n_points),
                       dtype=np.float64)
 
 
@@ -194,7 +203,7 @@ def sobol_pmax_boundary_nontrivial(n_points: int, domain: PinnDomain,
                                    seed: int = 0, *,
                                    angular_sampling: str = "xi") -> np.ndarray:
     """Return normalized samples fixed to the upper-momentum boundary."""
-    z = sobol_8d_nontrivial(
+    z = sobol_9d_nontrivial(
         n_points, domain, seed, angular_sampling=angular_sampling,
         momentum_sampling=domain.momentum_sampling)
     z[:, 0] = 1.0
@@ -205,7 +214,7 @@ def sobol_plow_boundary_nontrivial(n_points: int, domain: PinnDomain,
                                    seed: int = 0, *,
                                    angular_sampling: str = "xi") -> np.ndarray:
     """Return normalized samples fixed to the lower-momentum boundary."""
-    z = sobol_8d_nontrivial(
+    z = sobol_9d_nontrivial(
         n_points, domain, seed, angular_sampling=angular_sampling,
         momentum_sampling=domain.momentum_sampling)
     z[:, 0] = 0.0
@@ -217,24 +226,24 @@ def analytic_threshold_collocation(n_points: int, domain: PinnDomain, *,
                                    batch_size: int = 32768) -> np.ndarray:
     """Sample a band around the analytic physical ``U_p=0`` threshold curve."""
     if n_points <= 0:
-        return np.empty((0, 8), dtype=np.float64)
+        return np.empty((0, 9), dtype=np.float64)
     if not 0.0 < band_width < 1.0:
         raise ValueError("band_width must be in (0, 1)")
     engine = qmc.Sobol(d=9, scramble=True, seed=seed)
     accepted, count = [], 0
     for _ in range(32):
         u = np.asarray(engine.random(batch_size), dtype=np.float64)
-        z = np.empty((batch_size, 8), dtype=np.float64)
+        z = np.empty((batch_size, 9), dtype=np.float64)
         z[:, 0] = u[:, 0]
-        z[:, 2:] = u[:, 1:7]
+        z[:, 2:] = u[:, 1:8]
         z[:, 1] = 0.5
-        p, _, ebar, te, nD, nNe, zD, zNe = split_inputs(jnp.asarray(z), domain)
-        cf, _, alpha = collision_coefficients(p, te, nD, nNe, zD, zNe, domain.B_T)
+        p, _, ebar, te, nD, nNe, zD, zNe, B_T = split_inputs(jnp.asarray(z), domain)
+        cf, _, alpha = collision_coefficients(p, te, nD, nNe, zD, zNe, B_T)
         z_boundary = z.copy()
         z_boundary[:, 0] = 1.0
         z_boundary[:, 1] = 0.0
-        pp, _, ee, tt, dd, nn, zd, zn = split_inputs(jnp.asarray(z_boundary), domain)
-        cf_max, _, _ = collision_coefficients(pp, tt, dd, nn, zd, zn, domain.B_T)
+        pp, _, ee, tt, dd, nn, zd, zn, BB = split_inputs(jnp.asarray(z_boundary), domain)
+        cf_max, _, _ = collision_coefficients(pp, tt, dd, nn, zd, zn, BB)
         gamma = jnp.sqrt(1.0 + p * p)
         A = alpha * gamma * p
         discriminant = ebar * ebar + 4.0 * A * (cf + A)
@@ -246,8 +255,8 @@ def analytic_threshold_collocation(n_points: int, domain: PinnDomain, *,
         nontrivial = np.asarray(jax.device_get(ebar - cf_max)) > 0.0
         physical = (np.isfinite(xi_root) & nontrivial
                     & (xi_root >= -1.0) & (xi_root <= 1.0))
-        delta = band_width * (0.25 + 0.75 * u[:, 7])
-        delta *= np.where(u[:, 8] < 0.5, -1.0, 1.0)
+        delta = band_width * (0.25 + 0.75 * u[:, 8])
+        delta *= np.where(u[:, 9] < 0.5, -1.0, 1.0)
         xi_sample = xi_root + delta
         physical &= (xi_sample >= -1.0) & (xi_sample <= 1.0)
         if np.any(physical):
@@ -265,8 +274,8 @@ def analytic_threshold_collocation(n_points: int, domain: PinnDomain, *,
 
 def drift_up(z, domain: PinnDomain):
     """Return normalized radial drift ``U_p``; positive means outward motion."""
-    p, xi, ebar, te, nD, nNe, zD, zNe = split_inputs(z, domain)
-    cf, _, alpha = collision_coefficients(p, te, nD, nNe, zD, zNe, domain.B_T)
+    p, xi, ebar, te, nD, nNe, zD, zNe, B_T = split_inputs(z, domain)
+    cf, _, alpha = collision_coefficients(p, te, nD, nNe, zD, zNe, B_T)
     gamma = jnp.sqrt(1.0 + p * p)
     return -ebar * xi - cf - alpha * gamma * p * (1.0 - xi * xi)
 
@@ -290,8 +299,8 @@ def rescale_coefficients(coefficients, cf, ebar, coeff_norm="cf_ebar"):
 
 def pde_coefficients(z, domain: PinnDomain, coeff_norm: str = "cf_ebar"):
     """Return normalized coefficients for p, xi, and second-xi derivatives."""
-    p, xi, ebar, te, nD, nNe, zD, zNe = split_inputs(z, domain)
-    cf, nud, alpha = collision_coefficients(p, te, nD, nNe, zD, zNe, domain.B_T)
+    p, xi, ebar, te, nD, nNe, zD, zNe, B_T = split_inputs(z, domain)
+    cf, nud, alpha = collision_coefficients(p, te, nD, nNe, zD, zNe, B_T)
     gamma = jnp.sqrt(1.0 + p * p)
     up = -ebar * xi - cf - alpha * gamma * p * (1.0 - xi * xi)
     # Chain rule converts derivatives in normalized momentum to derivatives
@@ -361,9 +370,12 @@ def success_boundary_target(z, domain: PinnDomain):
     te = _map_unit(z[..., 3], domain.te_min_eV, domain.te_max_eV, "log")
     nD = _map_unit(z[..., 4], domain.nD_min_m3, domain.nD_max_m3, "log")
     nNe = _map_unit(z[..., 5], domain.nNe_min_m3, domain.nNe_max_m3, "log")
-    zD = domain.zD_min + z[..., 6] * (domain.zD_max - domain.zD_min)
-    zNe = domain.zNe_min + z[..., 7] * (domain.zNe_max - domain.zNe_min)
-    cf, _, alpha = collision_coefficients(p, te, nD, nNe, zD, zNe, domain.B_T)
+    zD = jnp.exp(jnp.log(domain.zD_min)
+                 + z[..., 6] * jnp.log(domain.zD_max / domain.zD_min))
+    zNe = jnp.exp(jnp.log(domain.zNe_min)
+                  + z[..., 7] * jnp.log(domain.zNe_max / domain.zNe_min))
+    B_T = domain.B_T_min + z[..., 8] * (domain.B_T_max - domain.B_T_min)
+    cf, _, alpha = collision_coefficients(p, te, nD, nNe, zD, zNe, B_T)
     gamma = jnp.sqrt(1.0 + p * p)
     up = -ebar * xi - cf - alpha * gamma * p * (1.0 - xi * xi)
     return (up > 0.0).astype(jnp.float64)

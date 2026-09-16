@@ -1,8 +1,8 @@
 """MLP and DeepONet architectures plus probability-constrained prediction.
 
-The pointwise interface is eight normalized coordinates: two phase-space
-coordinates followed by six physical-parameter coordinates. DeepONet keeps
-these groups separate as a six-coordinate branch and a two-coordinate trunk.
+The pointwise interface is nine normalized coordinates: two phase-space
+coordinates followed by seven physical-parameter coordinates. DeepONet keeps
+these groups separate as a seven-coordinate branch and a two-coordinate trunk.
 """
 
 from __future__ import annotations
@@ -96,17 +96,17 @@ def _init_dense_mlp(key, input_dim, output_dim, width, depth):
 
 
 def init_mlp(key, width=32, depth=4):
-    """Initialize an eight-input, one-output pointwise MLP."""
-    return _init_dense_mlp(key, 8, 1, width, depth)
+    """Initialize a nine-input, one-output pointwise MLP."""
+    return _init_dense_mlp(key, 9, 1, width, depth)
 
 
 def init_deeponet(key, latent_width=64, branch_width=32, branch_depth=3,
                   trunk_width=32, trunk_depth=3):
-    """Initialize six-parameter branch and two-coordinate trunk networks."""
+    """Initialize seven-parameter branch and two-coordinate trunk networks."""
     branch_key, trunk_key = jax.random.split(key)
     return {
         "branch": _init_dense_mlp(
-            branch_key, 6, latent_width, branch_width, branch_depth),
+            branch_key, 7, latent_width, branch_width, branch_depth),
         "trunk": _init_dense_mlp(
             trunk_key, 2, latent_width, trunk_width, trunk_depth),
         "bias": jnp.asarray(0.0, dtype=jnp.float64),
@@ -143,6 +143,8 @@ def load_model(path, *, model_type="mlp", width=32, depth=4,
                latent_width=64, branch_width=32, branch_depth=3,
                trunk_width=32, trunk_depth=3):
     """Restore parameters using an exactly matching architecture template."""
+    if model_type not in ("mlp", "deeponet"):
+        raise ValueError("model_type must be 'mlp' or 'deeponet'")
     if model_type == "deeponet":
         template = init_deeponet(
             jax.random.PRNGKey(0), latent_width=latent_width,

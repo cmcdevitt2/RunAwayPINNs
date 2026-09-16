@@ -31,7 +31,7 @@ sbatch train_model.sbatch
 sbatch validate_model.sbatch
 ```
 
-For an active allocation or a small smoke check, run drivers directly:
+For interactive validation, run drivers directly inside an allocation:
 
 ```bash
 python generate_fv_dataset.py
