@@ -28,13 +28,16 @@ MEAN_EXCITATION_EV_BY_Z = {
 
 @dataclass(frozen=True)
 class GridConfig:
-    """Logarithmic momentum and uniform-theta grid specification."""
+    """Momentum and uniform-theta grid specification."""
     p_min: float = 0.1
     p_max: float = 100.0
     N_p: int = 1024
     theta_min: float = 0.0
     theta_max: float = np.pi
     N_xi: int = 256
+    p_grid_mode: str = "log"
+    p_split_fraction: float = 0.75
+    p_cluster_power: float = 2.5
 
 
 @dataclass(frozen=True)
@@ -110,7 +113,24 @@ def build_grid(cfg: GridConfig) -> Grid:
     """Build a log-p grid and a uniform-theta grid represented in xi order."""
     if cfg.p_min <= 0 or cfg.p_max <= cfg.p_min:
         raise ValueError("logarithmic momentum grid requires 0 < p_min < p_max")
-    p_face = np.geomspace(cfg.p_min, cfg.p_max, cfg.N_p + 1)
+    if cfg.p_grid_mode not in ("log", "composite"):
+        raise ValueError("p_grid_mode must be 'log' or 'composite'")
+    if not 0.0 < cfg.p_split_fraction < 1.0 or cfg.p_cluster_power <= 1.0:
+        raise ValueError("invalid composite p-grid settings")
+    if cfg.p_grid_mode == "log":
+        p_face = np.geomspace(cfg.p_min, cfg.p_max, cfg.N_p + 1)
+    else:
+        p_split = np.exp(
+            np.log(cfg.p_min)
+            + cfg.p_split_fraction * np.log(cfg.p_max / cfg.p_min))
+        p_split = max(p_split, cfg.p_min * (1.0 + 1.0e-6))
+        n_low = max(1, min(cfg.N_p - 1,
+                           int(round(cfg.N_p * cfg.p_split_fraction))))
+        low = np.geomspace(cfg.p_min, p_split, n_low + 1)
+        unit = np.linspace(0.0, 1.0, cfg.N_p - n_low + 1)
+        high = cfg.p_max - (cfg.p_max - p_split) * (
+            1.0 - unit) ** cfg.p_cluster_power
+        p_face = np.concatenate((low[:-1], high))
     if (cfg.theta_min != 0.0 or cfg.theta_max != np.pi
             or cfg.theta_min < 0 or cfg.theta_max <= cfg.theta_min):
         raise ValueError("FV theta grid must span exactly [0, pi]")

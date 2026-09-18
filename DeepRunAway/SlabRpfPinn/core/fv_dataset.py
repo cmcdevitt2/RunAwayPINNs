@@ -40,6 +40,11 @@ class FvDatasetConfig:
     fv_Nxi: int = 128
     fv_p_stride: int = 2
     fv_xi_stride: int = 4
+    fv_boundary_p_cells: int = 0
+    fv_boundary_xi_cells: int = 0
+    p_grid_mode: str = "log"
+    p_split_fraction: float = 0.75
+    p_cluster_power: float = 2.5
     fv_p_min: float = 0.002
     fv_p_coarse_N: int = 32
     n_jobs: int = 1
@@ -52,10 +57,15 @@ class FvDatasetConfig:
                 or self.n_cases <= 0 or self.p_max <= 0.0
                 or self.fv_Np <= 0 or self.fv_Nxi <= 0
                 or self.fv_p_stride <= 0 or self.fv_xi_stride <= 0
+                or self.fv_boundary_p_cells < 0
+                or self.fv_boundary_xi_cells < 0
                 or self.fv_p_min <= 0.0 or self.fv_p_min >= self.p_max
                 or self.fv_p_coarse_N < 1
                 or self.n_jobs < -1 or self.n_jobs == 0
-                or self.candidate_oversample < 1.0):
+                or self.candidate_oversample < 1.0
+                or self.p_grid_mode not in ("log", "composite")
+                or not 0.0 < self.p_split_fraction < 1.0
+                or self.p_cluster_power <= 1.0):
             raise ValueError("invalid FV dataset setting")
 
 
@@ -97,7 +107,8 @@ def _prepend_zero_tail(p_center, P, p_min_global, N_p_coarse):
 
 
 def solve_cpu_case(case, *, p_max, Np, Nxi, B_T=None, p_min_global, N_p_coarse,
-                    p_scan_min=1.0e-12):
+                    p_scan_min=1.0e-12, p_grid_mode="log",
+                    p_split_fraction=0.75, p_cluster_power=2.5):
     """Solve one normalized-E D/Ne case on its adaptive dense log-p grid.
 
     The returned grid always spans the prescribed [p_min_global, p_max]: cells
@@ -129,7 +140,10 @@ def solve_cpu_case(case, *, p_max, Np, Nxi, B_T=None, p_min_global, N_p_coarse,
     if up_max_minus_one <= 0.0:
         # No outward drift exists at the successful boundary: RPF is zero.
         p_dense_min = max(p_min_global, min(p_cap, max(p_scan_min, p_max * 1.0e-6)))
-        grid = build_grid(GridConfig(p_min=p_dense_min, p_max=p_max, N_p=Np, N_xi=Nxi))
+        grid = build_grid(GridConfig(
+            p_min=p_dense_min, p_max=p_max, N_p=Np, N_xi=Nxi,
+            p_grid_mode=p_grid_mode, p_split_fraction=p_split_fraction,
+            p_cluster_power=p_cluster_power))
         P = np.zeros((Np, Nxi), dtype=np.float64)
         p_full, P_full = _prepend_zero_tail(
             grid.p_center, P, p_min_global, N_p_coarse)
@@ -147,7 +161,10 @@ def solve_cpu_case(case, *, p_max, Np, Nxi, B_T=None, p_min_global, N_p_coarse,
     energy_zero = np.sqrt(1.0 + p_zero**2) - 1.0
     p_dense_min_uncapped = momentum_from_kinetic_energy(0.5 * energy_zero)
     p_dense_min = max(p_min_global, min(p_dense_min_uncapped, p_cap))
-    grid = build_grid(GridConfig(p_min=p_dense_min, p_max=p_max, N_p=Np, N_xi=Nxi))
+    grid = build_grid(GridConfig(
+        p_min=p_dense_min, p_max=p_max, N_p=Np, N_xi=Nxi,
+        p_grid_mode=p_grid_mode, p_split_fraction=p_split_fraction,
+        p_cluster_power=p_cluster_power))
     coll = build_collision_data(grid, plasma_cfg, plasma)
     L = assemble_fp_operator(grid, plasma, coll)
     failure, escape = radial_boundary_rates(grid, plasma, coll)
@@ -187,11 +204,14 @@ def solve_cpu_case(case, *, p_max, Np, Nxi, B_T=None, p_min_global, N_p_coarse,
 
 
 def generate_cpu_cases(cases, *, p_max, Np, Nxi, B_T=None, p_min_global, N_p_coarse,
-                        n_jobs=-1, p_scan_min=1.0e-12):
+                        n_jobs=-1, p_scan_min=1.0e-12, p_grid_mode="log",
+                        p_split_fraction=0.75, p_cluster_power=2.5):
     """Generate adaptive-grid FV cases in parallel with joblib."""
     worker = partial(solve_cpu_case, p_max=p_max, Np=Np, Nxi=Nxi, B_T=B_T,
                      p_min_global=p_min_global, N_p_coarse=N_p_coarse,
-                     p_scan_min=p_scan_min)
+                     p_scan_min=p_scan_min, p_grid_mode=p_grid_mode,
+                     p_split_fraction=p_split_fraction,
+                     p_cluster_power=p_cluster_power)
     return Parallel(n_jobs=n_jobs, backend="loky")(
         delayed(worker)(case) for case in np.asarray(cases, dtype=np.float64)
     )
@@ -211,18 +231,44 @@ def flatten_fv_dataset(dataset):
     }
 
 
-def coarsen_fv_cases(results, *, p_stride=1, xi_stride=1):
-    """Return exact strided cell centers and fields; no interpolation occurs."""
+def coarsen_fv_cases(results, *, p_stride=1, xi_stride=1,
+                     boundary_p_cells=0, boundary_xi_cells=0):
+    """Coarsen fields while preserving configured boundary-adjacent cells."""
     if p_stride < 1 or xi_stride < 1:
         raise ValueError("FV strides must be positive integers")
     if not results:
         return []
-    return [{
-        **result,
-        "p": result["p"][::p_stride],
-        "xi": result["xi"][::xi_stride],
-        "P": result["P"][::p_stride, ::xi_stride],
-    } for result in results]
+    def selected_indices(length, stride, boundary_cells, *, start=False):
+        indices = np.arange(0, length, stride)
+        if boundary_cells:
+            if start:
+                boundary = np.arange(min(boundary_cells, length))
+            else:
+                boundary = np.arange(max(0, length - boundary_cells), length)
+            indices = np.unique(np.concatenate((indices, boundary)))
+        return indices
+
+    coarsened = []
+    for result in results:
+        p_indices = selected_indices(
+            len(result["p"]), p_stride, boundary_p_cells)
+        xi_indices = selected_indices(
+            len(result["xi"]), xi_stride, boundary_xi_cells, start=True)
+        xi_indices = np.unique(np.concatenate((
+            xi_indices,
+            selected_indices(len(result["xi"]), xi_stride,
+                             boundary_xi_cells, start=False))))
+        field = np.asarray(result["P"])[np.ix_(p_indices, xi_indices)]
+        updated = {
+            **result,
+            "p": np.asarray(result["p"])[p_indices],
+            "xi": np.asarray(result["xi"])[xi_indices],
+            "P": field,
+            "probability_min": float(np.min(field)),
+            "probability_max": float(np.max(field)),
+        }
+        coarsened.append(updated)
+    return coarsened
 
 
 def _validate_fv_results(cases, results):
@@ -441,38 +487,9 @@ def summarize_fv_dataset(dataset_path):
 
 
 def plot_fv_coverage(dataset_path, output_path):
-    """Save parameter-coverage and adaptive-grid summary plots."""
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_dir = output_path.parent / ".matplotlib"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("MPLCONFIGDIR", str(cache_dir))
-    import matplotlib.pyplot as plt
-    dataset = load_fv_dataset(dataset_path)
-    cases = np.asarray(dataset["cases"], dtype=np.float64)
-    fields = np.asarray(dataset["P_grid"], dtype=np.float64)
-    metadata = json.loads(str(np.asarray(dataset["case_metadata_json"]).item()))
-    p_dense_min = np.asarray([item["p_dense_min"] for item in metadata], dtype=np.float64)
-    runtime = np.asarray(
-        [item["runtime_seconds"] for item in metadata], dtype=np.float64)
-    zero_fraction = np.mean(fields == 0.0, axis=(1, 2))
-    fig, axes = plt.subplots(2, 3, figsize=(15, 8), constrained_layout=True)
-    axes[0, 0].hist(p_dense_min, bins=40)
-    axes[0, 0].set(xscale="log", xlabel="adaptive dense-zone front", ylabel="cases")
-    axes[0, 1].hist(runtime, bins=40)
-    axes[0, 1].set(xlabel="runtime [s/case]", ylabel="cases")
-    axes[0, 2].scatter(cases[:, 0], cases[:, 1], s=4, alpha=0.35)
-    axes[0, 2].set(xscale="log", yscale="log", xlabel="E/Ec", ylabel="Te [eV]")
-    axes[1, 0].scatter(cases[:, 2], cases[:, 3], s=4, alpha=0.35)
-    axes[1, 0].set(xscale="log", yscale="log", xlabel="nD", ylabel="nNe")
-    axes[1, 1].scatter(cases[:, 4], cases[:, 5], s=4, alpha=0.35)
-    axes[1, 1].set(xlabel="zD", ylabel="zNe")
-    axes[1, 2].scatter(p_dense_min, zero_fraction, s=4, alpha=0.35)
-    axes[1, 2].set(xscale="log", xlabel="adaptive dense-zone front", ylabel="zero-P fraction")
-    for axis in axes.ravel():
-        axis.grid(alpha=0.25)
-    fig.savefig(output_path, dpi=150)
-    plt.close(fig)
+    """Compatibility wrapper for the focused dataset-plot module."""
+    from core.dataset_plots import plot_fv_coverage as plot
+    return plot(dataset_path, output_path)
 
 
 def analyze_fv_dataset(config_path="configs/fv_dataset.json"):

@@ -148,10 +148,15 @@ def _main(config_path):
             local_cases, p_max=dataset_config["p_max"],
             Np=dataset_config["fv_Np"], Nxi=dataset_config["fv_Nxi"],
             p_min_global=dataset_config["fv_p_min"],
-            N_p_coarse=dataset_config["fv_p_coarse_N"], n_jobs=worker_count)
+            N_p_coarse=dataset_config["fv_p_coarse_N"], n_jobs=worker_count,
+            p_grid_mode=dataset_config.get("p_grid_mode", "log"),
+            p_split_fraction=dataset_config.get("p_split_fraction", 0.75),
+            p_cluster_power=dataset_config.get("p_cluster_power", 2.5))
         local_results = coarsen_fv_cases(
             local_results, p_stride=dataset_config["fv_p_stride"],
-            xi_stride=dataset_config["fv_xi_stride"])
+            xi_stride=dataset_config["fv_xi_stride"],
+            boundary_p_cells=dataset_config.get("fv_boundary_p_cells", 0),
+            boundary_xi_cells=dataset_config.get("fv_boundary_xi_cells", 0))
         result_path = work_dir / f"results.round{round_number}.rank{rank}.npz"
         temporary_result = result_path.with_name(
             f".{result_path.name}.{os.getpid()}.tmp.npz")

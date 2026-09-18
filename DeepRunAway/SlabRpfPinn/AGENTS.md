@@ -70,14 +70,27 @@ identify the exact skill and instruction before pausing.
   and loading.
 - `core/fv_distributed.py` owns multi-node CPU dataset orchestration.
 - `core/model.py` owns MLP/DeepONet architecture and prediction.
+- `core/sampling.py` owns training batch and case sampling.
+- `core/optimizers.py` owns SOAP construction and optimizer schedules.
 - `core/pde.py` owns normalized physical coefficients, residuals, boundaries,
   and collocation sampling.
-- `core/training.py` owns data, physics, SOAP, SSBroyden, and active loops.
+- `core/evaluation.py` owns validation input construction, metrics, and chunked
+  model/PDE evaluation.
+- `core/validation.py` owns validation workflow orchestration.
+- `core/validation_plots.py` owns validation diagnostic plots.
+- `core/dataset_plots.py` owns FV dataset coverage plots.
+- `core/training_plots.py` owns training-history plots.
+- `core/training_runtime.py` owns JAX device, replication, and sharding helpers.
+- `core/training_data.py` owns supervised training and grouped FV input assembly.
+- `core/training_physics.py` owns physics-informed, SSBroyden, and active
+  training loops.
+- `core/training.py` owns high-level training workflow orchestration and
+  compatibility exports.
 - `core/training_config.py` owns the hierarchical training schema.
 - `core/training_artifacts.py` owns manifests, checksums, atomic writes, file
-  barriers, checkpoints, and histories.
+  barriers, checkpoints, and training-output persistence.
 - The three root Python files (`generate_fv_dataset.py`, `train_model.py`,
-  `validate_model.py`) are config-only user entry points.
+  `validate_model.py`) are config-driven user entry points.
 - The three root Slurm files (`generate_fv_dataset.sbatch`, `train_model.sbatch`,
   `validate_model.sbatch`) are production job entry points.
 

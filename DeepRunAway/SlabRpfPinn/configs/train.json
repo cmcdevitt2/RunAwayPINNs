@@ -1,5 +1,5 @@
 {
-  "mode": "data",
+  "mode": "physics",
   "parameter_domain": {
     "E/Ec": [1.0, 1000.0, "log"],
     "Te_eV": [0.1, 100.0, "log"],
@@ -41,12 +41,12 @@
   },
   "loss": {
     "enable_data": true,
-    "enable_pde": false,
+    "enable_pde": true,
     "enable_threshold_pde": false,
     "enable_low_p_bc": false,
     "enable_pmax_bc": false,
     "data_weight": 1.0,
-    "pde_weight": 0.0,
+    "pde_weight": 0.001,
     "threshold_weight": 0.0,
     "low_p_weight": 0.0,
     "bc_weight": 0.0,
@@ -89,11 +89,12 @@
     "seed": 2026
   },
   "collocation": {
-    "pde_points": 65536,
-    "threshold_points": 16384,
+    "pde_points": 0,
+    "pde_on_data": true,
+    "threshold_points": 0,
     "threshold_band_width": 0.02,
-    "low_p_points": 16384,
-    "boundary_points": 16384
+    "low_p_points": 0,
+    "boundary_points": 0
   },
   "ssbroyden": {
     "enabled": false
@@ -113,9 +114,9 @@
     "seed": 12026
   },
   "initial_model": null,
-  "dataset_path": "data/fv_dataset_131072",
-  "dataset_manifest": "runs/fv_dataset_131072/run_manifest.json",
-  "output_dir": "runs/train_vanilla_mlp_131072_b128_d6",
-  "checkpoint_dir": "runs/train_vanilla_mlp_131072_b128_d6/checkpoints",
-  "run_dir": "runs/train_vanilla_mlp_131072_b128_d6"
+  "dataset_path": "data/fv_dataset_131072_composite_n16",
+  "dataset_manifest": "runs/fv_dataset_131072_composite_n16/run_manifest.json",
+  "output_dir": "runs/train_data_physics_131072_composite_b128_d6_20260918",
+  "checkpoint_dir": "runs/train_data_physics_131072_composite_b128_d6_20260918/checkpoints",
+  "run_dir": "runs/train_data_physics_131072_composite_b128_d6_20260918"
 }

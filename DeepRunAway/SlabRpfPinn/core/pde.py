@@ -9,6 +9,7 @@ momentum mapping before residual evaluation.
 from __future__ import annotations
 
 import os
+from functools import lru_cache
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
@@ -180,7 +181,7 @@ def sobol_9d_nontrivial(n_points: int, domain: PinnDomain, seed: int = 0, *,
         cf, _, _ = collision_coefficients(p, te, nD, nNe, zD, zNe, B_T)
         keep = np.asarray(jax.device_get(ebar - cf)) > 0.0
         if np.any(keep):
-            accepted.append(z[keep])
+            accepted.append(z[keep, :9])
             count += int(np.count_nonzero(keep))
             if count >= n_points:
                 break
@@ -229,7 +230,7 @@ def analytic_threshold_collocation(n_points: int, domain: PinnDomain, *,
         return np.empty((0, 9), dtype=np.float64)
     if not 0.0 < band_width < 1.0:
         raise ValueError("band_width must be in (0, 1)")
-    engine = qmc.Sobol(d=9, scramble=True, seed=seed)
+    engine = qmc.Sobol(d=10, scramble=True, seed=seed)
     accepted, count = [], 0
     for _ in range(32):
         u = np.asarray(engine.random(batch_size), dtype=np.float64)
@@ -288,7 +289,8 @@ def rescale_coefficients(coefficients, cf, ebar, coeff_norm="cf_ebar"):
     must not be made configurable.
     """
     if coeff_norm == "cf_ebar":
-        return coefficients / jnp.abs(cf) / jnp.sqrt(ebar)
+        scale = jnp.abs(cf)[..., None] * jnp.sqrt(ebar)[..., None]
+        return coefficients / scale
     if coeff_norm == "coeff_l2":
         norm = jnp.sqrt(jnp.sum(coefficients ** 2, axis=-1, keepdims=True))
         return coefficients / jnp.maximum(norm, 1.0e-30)
@@ -332,11 +334,9 @@ def residual_single(params, z, coefficients, probability_fn, residual_floor=0.1)
             + coefficients[2] * second_xi) / denom
 
 
-def make_pde_functions(domain: PinnDomain, *, probability_fn=None,
-                       coeff_norm: str = "cf_ebar", residual_floor: float = 0.1):
-    """Build JIT/VMap coefficient and residual functions for one domain."""
-    if probability_fn is None:
-        from core.model import probability as probability_fn
+@lru_cache(maxsize=16)
+def _make_pde_functions_cached(domain, probability_fn, coeff_norm, residual_floor):
+    """Build and cache JIT/VMap functions for one immutable PDE setup."""
     coefficients = jax.jit(jax.vmap(
         lambda z: pde_coefficients(z, domain, coeff_norm)))
     residual = jax.jit(jax.vmap(
@@ -344,6 +344,15 @@ def make_pde_functions(domain: PinnDomain, *, probability_fn=None,
             params, z, c, probability_fn, residual_floor),
         in_axes=(None, 0, 0)))
     return coefficients, residual
+
+
+def make_pde_functions(domain: PinnDomain, *, probability_fn=None,
+                       coeff_norm: str = "cf_ebar", residual_floor: float = 0.1):
+    """Build or reuse JIT/VMap coefficient and residual functions."""
+    if probability_fn is None:
+        from core.model import probability as probability_fn
+    return _make_pde_functions_cached(
+        domain, probability_fn, coeff_norm, float(residual_floor))
 
 
 def evaluate_pde_residuals(params, z, domain: PinnDomain, *, chunk_size=65536,

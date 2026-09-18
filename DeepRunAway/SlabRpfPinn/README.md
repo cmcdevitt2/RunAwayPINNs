@@ -44,3 +44,10 @@ Each script reads its own JSON config: `configs/fv_dataset.json`,
 and manifest checks enforce cross-stage requirements. Each new run needs new
 `run_dir`/`output_dir`/`checkpoint_dir` values; completed runs are protected
 from overwrite.
+
+## Code layout
+
+`core/` separates model architecture, sampling, optimizers, PDE physics,
+supervised and physics training, evaluation, workflow orchestration, plotting,
+and artifact persistence. Root Python files only select configuration and call
+those workflow modules.

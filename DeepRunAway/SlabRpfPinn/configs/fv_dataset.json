@@ -15,14 +15,19 @@
     "fv_Nxi": 128,
     "fv_p_stride": 4,
     "fv_xi_stride": 4,
+    "fv_boundary_p_cells": 128,
+    "fv_boundary_xi_cells": 8,
+    "p_grid_mode": "composite",
+    "p_split_fraction": 0.75,
+    "p_cluster_power": 2.5,
     "fv_p_min": 0.002,
     "fv_p_coarse_N": 32,
-    "n_jobs": -1,
+    "n_jobs": 16,
     "seed": 2026,
     "candidate_oversample": 1.25
   },
-  "dataset_path": "data/fv_dataset_131072",
+  "dataset_path": "data/fv_dataset_131072_composite_n16",
   "dataset_format": "directory",
-  "work_dir": "runs/fv_dataset_131072/work",
-  "run_dir": "runs/fv_dataset_131072"
+  "work_dir": "runs/fv_dataset_131072_composite_n16/work",
+  "run_dir": "runs/fv_dataset_131072_composite_n16"
 }

@@ -236,8 +236,9 @@ class DataConfig:
 
 @dataclass(frozen=True)
 class CollocationConfig:
-    """Counts for interior, threshold, low-momentum, and high-momentum samples."""
+    """Counts for interior and boundary physics samples."""
     pde_points: int = 200000
+    pde_on_data: bool = False
     threshold_points: int = 100000
     threshold_band_width: float = 0.02
     low_p_points: int = 200000

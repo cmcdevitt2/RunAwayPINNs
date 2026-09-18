@@ -9,7 +9,7 @@ import sys
 
 from core.training import train_data_from_config as train_data
 from core.training import train_physics_from_config as train_physics
-from core.training_artifacts import plot_training_history as plot_training
+from core.training_plots import plot_training_history as plot_training
 from core.training_artifacts import finish_run
 
 CONFIG_PATH = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("configs/train.json")
